@@ -1,0 +1,52 @@
+# ARP Spoofer Pro 配置文件 - 香橙派优化版
+# ==========================================
+
+# 网络配置
+network:
+  interface: "wlan0"             # 香橙派网卡接口名
+  gateway_ip: "10.17.0.1"     # 网关IP
+  target_server: "121.248.150.37" # 目标服务器IP
+  target_ports: [80, 443, 8080, 801]  # 监听端口
+
+# IPC通信配置
+ipc:
+  packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
+  command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
+
+# 性能配置 (香橙派优化)
+performance:
+  max_worker_threads: 8          # 香橙派4核，每核2线程
+  packet_buffer_size: 8388608    # 8MB 数据包缓冲区
+  command_timeout: 1000          # 命令超时时间(ms)
+
+# 攻击策略
+attack:
+  stealth_mode: false            # 隐蔽模式
+  attack_timeout: 45             # 攻击超时时间(秒)
+  max_concurrent_attacks: 20     # 最大并发攻击数 (香橙派优化)
+  cooldown_time: 3600           # 冷却时间(秒)
+
+# 缓存配置
+cache:
+  arp_cache_ttl: 1800           # ARP缓存TTL(秒)
+  attack_cache_ttl: 3600        # 攻击记录TTL(秒)
+  target_info_ttl: 7200         # 目标信息TTL(秒)
+
+# 日志配置
+logging:
+  level: "INFO"                  # 日志级别
+  file: "/var/log/arp_spoofer.log"
+  max_size: 104857600           # 100MB
+  backup_count: 5
+
+# Web API配置
+web_api:
+  enabled: true                  # 启用Web API
+  port: 8080                    # 监听端口
+  host: "0.0.0.0"              # 监听所有接口
+
+# 安全配置
+security:
+  require_root: true            # 需要root权限
+  bind_to_cpu: true            # 绑定CPU核心
+  memory_limit: 536870912      # 512MB内存限制 (香橙派优化)

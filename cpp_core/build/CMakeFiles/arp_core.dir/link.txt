@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -march=native -mtune=native -flto -Wl,--dependency-file=CMakeFiles/arp_core.dir/link.d CMakeFiles/arp_core.dir/src/main.cpp.o CMakeFiles/arp_core.dir/src/packet_sniffer.cpp.o CMakeFiles/arp_core.dir/src/arp_spoofer.cpp.o CMakeFiles/arp_core.dir/src/ipc_manager.cpp.o CMakeFiles/arp_core.dir/src/utils.cpp.o -o arp_core  -lpcap /usr/lib/libzmq.so -lpthread
