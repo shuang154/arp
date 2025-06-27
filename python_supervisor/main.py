@@ -47,6 +47,11 @@ class PythonSupervisor:
         self.attack_coordinator = AttackCoordinator(config, self.state_cache)
         self.web_api = WebAPI(self.state_cache, config)
         
+        # ★【新增】★ 心跳机制
+        self.last_ping_time = time.time()
+        self.heartbeat_thread = None
+        self.heartbeat_running = False
+        
         # 线程池
         self.thread_pool = ThreadPoolExecutor(
             max_workers=config.max_worker_threads,
@@ -133,6 +138,9 @@ class PythonSupervisor:
         self.running = True
         self.logger.info("Starting main supervisor loop...")
         
+        # ★【新增】★ 启动心跳机制
+        self.start_heartbeat()
+        
         try:
             while self.running:
                 try:
@@ -150,7 +158,13 @@ class PythonSupervisor:
                     
                     # 验证是否为有效JSON
                     try:
-                        json.loads(packet_data)
+                        packet_info = json.loads(packet_data)
+                        
+                        # ★【新增】★ 检查是否为心跳PING
+                        if packet_info.get('type') == 'PING':
+                            self._handle_ping(packet_info)
+                            continue
+                            
                     except json.JSONDecodeError:
                         self.logger.warning(f"Received invalid JSON data, skipping")
                         continue
@@ -238,6 +252,59 @@ class PythonSupervisor:
             self.logger.warning("Command send timeout")
         except Exception as e:
             self.logger.error(f"Error sending command: {e}")
+            
+    # ★【新增】★ 心跳机制方法
+    def start_heartbeat(self):
+        """启动心跳监听线程"""
+        if self.heartbeat_running:
+            return
+            
+        self.heartbeat_running = True
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
+        self.logger.info("Heartbeat mechanism started")
+    
+    def stop_heartbeat(self):
+        """停止心跳机制"""
+        self.heartbeat_running = False
+        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
+            self.heartbeat_thread.join(timeout=1.0)
+        self.logger.info("Heartbeat mechanism stopped")
+    
+    def _heartbeat_loop(self):
+        """心跳监听循环"""
+        while self.heartbeat_running and self.running:
+            try:
+                # 检查是否收到PING，如果是则回复PONG
+                current_time = time.time()
+                
+                # 每5秒检查一次连接状态
+                if current_time - self.last_ping_time > 20:  # 20秒没收到ping
+                    self.logger.warning("⚠️  No heartbeat from C++ core for 20+ seconds")
+                
+                time.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Heartbeat loop error: {e}")
+                time.sleep(1)
+    
+    def _handle_ping(self, ping_data):
+        """处理心跳PING并回复PONG"""
+        try:
+            self.last_ping_time = time.time()
+            
+            # 构造PONG响应
+            pong_command = {
+                'type': 'PONG',
+                'timestamp': int(time.time() * 1000),  # 毫秒时间戳
+                'status': 'healthy'
+            }
+            
+            # 发送PONG
+            self._send_command(pong_command)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to handle ping: {e}")
             
     def _shutdown(self):
         """清理资源"""

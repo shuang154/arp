@@ -6,6 +6,9 @@
 #include <memory>
 #include <chrono>
 #include <optional>
+#include <atomic>
+#include <thread>
+#include <functional>
 
 // 数据包类型枚举
 enum class PacketType {
@@ -18,7 +21,10 @@ enum class PacketType {
 enum class CommandType {
     START_SPOOF = 1,
     STOP_SPOOF = 2,
-    RESTORE_ARP = 3
+    RESTORE_ARP = 3,
+    PING = 4,        // 心跳ping
+    PONG = 5,        // 心跳pong
+    SHUTDOWN = 6     // 优雅停机
 };
 
 // 常量定义
@@ -60,6 +66,16 @@ private:
     bool initialized_;
     uint64_t packets_sent_;
     uint64_t commands_received_;
+    
+    // ★【新增】★ 心跳机制
+    std::atomic<bool> heartbeat_running_;
+    std::unique_ptr<std::thread> heartbeat_thread_;
+    std::chrono::steady_clock::time_point last_ping_time_;
+    std::chrono::steady_clock::time_point last_pong_time_;
+    std::function<void()> connection_lost_callback_;
+    
+    static constexpr int HEARTBEAT_INTERVAL_MS = 10000;   // 10秒发送一次心跳（降低频率）
+    static constexpr int HEARTBEAT_TIMEOUT_MS = 30000;    // 30秒超时（增加容忍度）
 
 public:
     IPCManager();
@@ -74,13 +90,38 @@ public:
     // 接收Python层的命令
     std::optional<IPCCommand> receive_command(int timeout_ms = 1);
     
+    // ★【新增】★ 心跳相关方法
+    void start_heartbeat();
+    void stop_heartbeat();
+    bool is_connection_healthy() const;
+    void set_connection_lost_callback(std::function<void()> callback);
+    
     // 获取统计信息
     uint64_t get_packets_sent() const { return packets_sent_; }
     uint64_t get_commands_received() const { return commands_received_; }
+    
+    // ★【新增】★ 获取心跳状态
+    struct HeartbeatStatus {
+        bool is_healthy;
+        std::chrono::milliseconds last_ping_ago;
+        std::chrono::milliseconds last_pong_ago;
+        uint64_t total_pings_sent;
+        uint64_t total_pongs_received;
+    };
+    HeartbeatStatus get_heartbeat_status() const;
 
 private:
     std::string serialize_packet(const PacketInfo& packet);
     std::optional<IPCCommand> deserialize_command(const std::string& data);
+    
+    // ★【新增】★ 心跳相关私有方法
+    void heartbeat_loop();
+    bool send_ping();
+    void handle_pong();
+    
+    // 心跳统计
+    std::atomic<uint64_t> pings_sent_;
+    std::atomic<uint64_t> pongs_received_;
 };
 
 #endif // IPC_MANAGER_H

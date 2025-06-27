@@ -19,9 +19,17 @@ BUILD_DIR="${CPP_DIR}/build"
 CONFIG_DIR="${PROJECT_ROOT}/config"
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  ARP Spoofer Pro - 香橙派部署脚本${NC}"
+echo -e "${BLUE}  ARP Spoofer Pro v2.0 - 香橙派优化版${NC}"
+echo -e "${BLUE}  🚀 高性能・高稳定・智能化 🚀${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}项目路径: ${PROJECT_ROOT}${NC}"
+echo -e "${GREEN}✨ 新特性：${NC}"
+echo -e "${GREEN}  • 对象池机制 - 极致内存性能${NC}"
+echo -e "${GREEN}  • 智能CPU亲和性 - 最优核心分配${NC}"
+echo -e "${GREEN}  • 心跳监控机制 - 实时健康检查${NC}"
+echo -e "${GREEN}  • 配置热重载 - 无重启更新配置${NC}"
+echo -e "${GREEN}  • 优雅停机机制 - 安全资源清理${NC}"
+echo -e "${GREEN}  • 性能监控系统 - 实时状态报告${NC}"
 echo ""
 
 # 检查系统依赖
@@ -107,7 +115,13 @@ build_cpp_core() {
     make -j$(nproc)
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ C++核心引擎编译成功${NC}"
+        echo -e "${GREEN}✓ C++核心引擎编译成功 🎯${NC}"
+        echo -e "${GREEN}✨ 已集成以下优化特性：${NC}"
+        echo -e "${GREEN}  ✓ 对象池机制 - 减少内存分配开销${NC}"
+        echo -e "${GREEN}  ✓ 智能CPU绑定 - 优化线程性能${NC}"
+        echo -e "${GREEN}  ✓ 心跳监控 - 实时连接状态检查${NC}"
+        echo -e "${GREEN}  ✓ 优雅停机 - 安全资源清理${NC}"
+        echo -e "${GREEN}  ✓ 配置热重载 - 动态配置更新${NC}"
         
         # 检查可执行文件
         if [ -f "arp_core" ]; then

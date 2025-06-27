@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ARPSpooferCore VERSION 1.0.0 LANGUAGES CXX)
+project(ARPSpooferCore VERSION 2.0.0 LANGUAGES CXX)
 
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 17)
@@ -33,17 +33,29 @@ include_directories(${ZMQ_INCLUDE_DIR})
 include_directories(${RAPIDJSON_INCLUDE_DIR})
 include_directories(src)
 
-# 源文件
+# 添加源文件
 set(SOURCES
     src/main.cpp
     src/packet_sniffer.cpp
     src/arp_spoofer.cpp
     src/ipc_manager.cpp
     src/utils.cpp
+    src/config_manager.cpp
+)
+
+# 添加头文件
+set(HEADERS
+    src/packet_sniffer.h
+    src/arp_spoofer.h
+    src/ipc_manager.h
+    src/utils.h
+    src/object_pool.h
+    src/config_manager.h
+    src/graceful_shutdown.h
 )
 
 # 创建可执行文件
-add_executable(arp_core ${SOURCES})
+add_executable(arp_core ${SOURCES} ${HEADERS})
 
 # 链接库
 target_link_libraries(arp_core

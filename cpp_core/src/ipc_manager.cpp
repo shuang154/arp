@@ -9,10 +9,14 @@
 using namespace rapidjson;
 
 IPCManager::IPCManager() 
-    : initialized_(false), packets_sent_(0), commands_received_(0) {
+    : initialized_(false), packets_sent_(0), commands_received_(0),
+      heartbeat_running_(false), pings_sent_(0), pongs_received_(0) {
+    last_ping_time_ = std::chrono::steady_clock::now();
+    last_pong_time_ = std::chrono::steady_clock::now();
 }
 
 IPCManager::~IPCManager() {
+    stop_heartbeat();
     shutdown();
 }
 
@@ -62,7 +66,7 @@ bool IPCManager::send_packet(const PacketInfo& packet) {
         memcpy(message.data(), json_data.c_str(), json_data.size());
         
         auto result = packet_sender_->send(message, zmq::send_flags::dontwait);
-        if (result) {
+        if (result.has_value()) {  // ★【修复】★ 检查optional是否有值
             packets_sent_++;
             return true;
         }
@@ -163,6 +167,13 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
                 cmd.type = CommandType::STOP_SPOOF;
             } else if (type_str == "RESTORE_ARP") {
                 cmd.type = CommandType::RESTORE_ARP;
+            } else if (type_str == "PONG") {
+                cmd.type = CommandType::PONG;
+                handle_pong();  // 处理心跳响应
+                return cmd;     // 直接返回，不需要解析其他参数
+            } else if (type_str == "SHUTDOWN") {
+                cmd.type = CommandType::SHUTDOWN;
+                return cmd;
             } else {
                 std::cerr << "[IPC Manager] Unknown command type: " << type_str << std::endl;
                 return std::nullopt;
@@ -192,4 +203,164 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
         std::cerr << "[IPC Manager] Command deserialization failed: " << e.what() << std::endl;
         return std::nullopt;
     }
+}
+
+// ★【新增】★ 心跳机制实现
+void IPCManager::start_heartbeat() {
+    if (heartbeat_running_) {
+        return;
+    }
+    
+    heartbeat_running_ = true;
+    heartbeat_thread_ = std::make_unique<std::thread>(&IPCManager::heartbeat_loop, this);
+    std::cout << "[IPC Manager] Heartbeat mechanism started" << std::endl;
+}
+
+void IPCManager::stop_heartbeat() {
+    if (!heartbeat_running_) {
+        return;
+    }
+    
+    heartbeat_running_ = false;
+    if (heartbeat_thread_ && heartbeat_thread_->joinable()) {
+        heartbeat_thread_->join();
+    }
+    heartbeat_thread_.reset();
+    std::cout << "[IPC Manager] Heartbeat mechanism stopped" << std::endl;
+}
+
+void IPCManager::heartbeat_loop() {
+    std::cout << "[IPC Manager] Heartbeat loop started" << std::endl;
+    
+    // 初始化最后pong时间为当前时间
+    last_pong_time_ = std::chrono::steady_clock::now();
+    
+    while (heartbeat_running_) {
+        // 发送PING
+        if (!send_ping()) {
+            std::cerr << "[IPC Manager] Failed to send heartbeat ping" << std::endl;
+            
+            // 如果发送失败，尝试重新连接
+            try {
+                packet_sender_->disconnect("ipc:///tmp/arp_spoofer_packets.ipc");
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                packet_sender_->connect("ipc:///tmp/arp_spoofer_packets.ipc");
+                std::cout << "[IPC Manager] Attempted to reconnect packet sender" << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[IPC Manager] Reconnection failed: " << e.what() << std::endl;
+            }
+        }
+        
+        // 检查连接健康状态
+        auto now = std::chrono::steady_clock::now();
+        auto time_since_last_pong = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_pong_time_).count();
+        
+        if (time_since_last_pong > HEARTBEAT_TIMEOUT_MS) {
+            std::cerr << "[IPC Manager] ⚠️  Connection timeout! Last pong: " 
+                      << time_since_last_pong << "ms ago" << std::endl;
+            
+            // 触发连接丢失回调（但不要过于频繁）
+            static auto last_callback_time = std::chrono::steady_clock::now();
+            auto time_since_last_callback = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_callback_time).count();
+            
+            if (time_since_last_callback > 10000 && connection_lost_callback_) { // 10秒只调用一次
+                connection_lost_callback_();
+                last_callback_time = now;
+            }
+        }
+        
+        // 等待下一次心跳
+        std::this_thread::sleep_for(std::chrono::milliseconds(HEARTBEAT_INTERVAL_MS));
+    }
+    
+    std::cout << "[IPC Manager] Heartbeat loop ended" << std::endl;
+}
+
+bool IPCManager::send_ping() {
+    if (!initialized_ || !packet_sender_) {
+        return false;
+    }
+    
+    try {
+        // 构造PING消息
+        Document doc;
+        doc.SetObject();
+        Document::AllocatorType& allocator = doc.GetAllocator();
+        
+        doc.AddMember("type", "PING", allocator);
+        
+        // 获取当前时间戳（毫秒）
+        auto now = std::chrono::steady_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+        doc.AddMember("timestamp", timestamp, allocator);
+        doc.AddMember("seq", pings_sent_.load(), allocator);
+        
+        // 序列化
+        StringBuffer buffer;
+        Writer<StringBuffer> writer(buffer);
+        doc.Accept(writer);
+        
+        // 发送
+        zmq::message_t message(buffer.GetSize());
+        memcpy(message.data(), buffer.GetString(), buffer.GetSize());
+        
+        auto send_result = packet_sender_->send(message, zmq::send_flags::dontwait);
+        bool sent = send_result.has_value();
+        if (sent) {
+            last_ping_time_ = std::chrono::steady_clock::now();
+            pings_sent_++;
+        }
+        
+        return sent;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "[IPC Manager] Failed to send ping: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void IPCManager::handle_pong() {
+    last_pong_time_ = std::chrono::steady_clock::now();
+    pongs_received_++;
+    
+    // 计算往返时间
+    auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
+        last_pong_time_ - last_ping_time_).count();
+    
+    // 可以在这里记录RTT统计信息
+    if (rtt > 100) {  // 如果RTT超过100ms，发出警告
+        std::cout << "[IPC Manager] ⚠️  High RTT detected: " << rtt << "ms" << std::endl;
+    }
+}
+
+bool IPCManager::is_connection_healthy() const {
+    auto now = std::chrono::steady_clock::now();
+    auto time_since_last_pong = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - last_pong_time_).count();
+    
+    return time_since_last_pong <= HEARTBEAT_TIMEOUT_MS;
+}
+
+void IPCManager::set_connection_lost_callback(std::function<void()> callback) {
+    connection_lost_callback_ = callback;
+}
+
+IPCManager::HeartbeatStatus IPCManager::get_heartbeat_status() const {
+    auto now = std::chrono::steady_clock::now();
+    
+    auto last_ping_ago = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - last_ping_time_);
+    auto last_pong_ago = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - last_pong_time_);
+    
+    return {
+        is_connection_healthy(),
+        last_ping_ago,
+        last_pong_ago,
+        pings_sent_.load(),
+        pongs_received_.load()
+    };
 }

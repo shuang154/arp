@@ -11,6 +11,9 @@
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <unordered_map>
+#include <algorithm>
+#include <mutex>
 
 bool bind_to_cpu(int cpu_id) {
     cpu_set_t cpuset;
@@ -189,4 +192,124 @@ std::string get_gateway_ip(const std::string& interface) {
     }
     
     return "";
+}
+
+// ★【新增】★ 智能CPU亲和性管理器实现
+static std::unordered_map<std::string, int> task_cpu_map;
+static std::mutex task_cpu_mutex;
+
+CPUAffinityManager::CPUInfo CPUAffinityManager::get_cpu_info() {
+    CPUInfo info;
+    
+    // 获取总核心数
+    info.total_cores = get_cpu_count();
+    
+    // 简化实现：假设物理核心数是逻辑核心数的一半（对于支持超线程的CPU）
+    info.logical_cores = info.total_cores;
+    info.physical_cores = std::max(1, info.total_cores / 2);
+    
+    // 构建可用核心列表
+    for (int i = 0; i < info.total_cores; ++i) {
+        info.available_cores.push_back(i);
+    }
+    
+    return info;
+}
+
+bool CPUAffinityManager::bind_thread_to_core(int core_id) {
+    return bind_to_cpu(core_id);
+}
+
+bool CPUAffinityManager::bind_current_thread_to_core(int core_id) {
+    return bind_to_cpu(core_id);
+}
+
+int CPUAffinityManager::allocate_cpu_for_task(const std::string& task_name) {
+    std::lock_guard<std::mutex> lock(task_cpu_mutex);
+    
+    auto cpu_info = get_cpu_info();
+    
+    // 智能分配策略
+    if (task_name == "packet_sniffer") {
+        // 数据包嗅探：优先使用第一个物理核心
+        int target_cpu = 0;
+        task_cpu_map[task_name] = target_cpu;
+        return target_cpu;
+    } else if (task_name == "ipc_handler") {
+        // IPC处理：使用第二个物理核心
+        int target_cpu = std::min(1, cpu_info.total_cores - 1);
+        task_cpu_map[task_name] = target_cpu;
+        return target_cpu;
+    } else if (task_name == "arp_spoofer") {
+        // ARP欺骗：使用第三个核心或回到第一个
+        int target_cpu = cpu_info.total_cores > 2 ? 2 : 0;
+        task_cpu_map[task_name] = target_cpu;
+        return target_cpu;
+    } else {
+        // 其他任务：轮询分配
+        int target_cpu = task_cpu_map.size() % cpu_info.total_cores;
+        task_cpu_map[task_name] = target_cpu;
+        return target_cpu;
+    }
+}
+
+void CPUAffinityManager::release_cpu_for_task(const std::string& task_name) {
+    std::lock_guard<std::mutex> lock(task_cpu_mutex);
+    task_cpu_map.erase(task_name);
+}
+
+std::vector<int> CPUAffinityManager::get_optimal_cpu_distribution(int num_tasks) {
+    auto cpu_info = get_cpu_info();
+    std::vector<int> distribution;
+    
+    if (num_tasks <= cpu_info.total_cores) {
+        // 如果任务数少于核心数，每个任务分配一个核心
+        for (int i = 0; i < num_tasks; ++i) {
+            distribution.push_back(i % cpu_info.total_cores);
+        }
+    } else {
+        // 如果任务数多于核心数，均匀分配
+        for (int i = 0; i < num_tasks; ++i) {
+            distribution.push_back(i % cpu_info.total_cores);
+        }
+    }
+    
+    return distribution;
+}
+
+// ★【优化】★ 系统性能监控实现
+SystemStats get_system_stats() {
+    SystemStats stats = {0};
+    
+    // 获取内存使用情况
+    stats.memory_used_bytes = get_memory_usage();
+    
+    // 简化实现：读取/proc/meminfo获取总内存
+    std::ifstream meminfo("/proc/meminfo");
+    if (meminfo.is_open()) {
+        std::string line;
+        while (std::getline(meminfo, line)) {
+            if (line.find("MemTotal:") == 0) {
+                std::istringstream iss(line);
+                std::string label;
+                size_t value;
+                std::string unit;
+                if (iss >> label >> value >> unit) {
+                    stats.memory_total_bytes = value * 1024; // 转换为字节
+                    break;
+                }
+            }
+        }
+        meminfo.close();
+    }
+    
+    if (stats.memory_total_bytes > 0) {
+        stats.memory_usage_percent = 
+            (static_cast<double>(stats.memory_used_bytes) / stats.memory_total_bytes) * 100.0;
+    }
+    
+    // 简化实现：CPU使用率（这里返回一个估计值）
+    stats.cpu_usage_percent = 0.0; // 实际实现需要读取/proc/stat
+    
+    return stats;
 }
