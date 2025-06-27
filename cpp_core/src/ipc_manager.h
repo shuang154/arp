@@ -55,6 +55,8 @@ struct IPCCommand {
     std::string target_mac;
     std::string gateway_mac;
     uint32_t duration = 0;
+    std::string attack_type = "standard";  // ★【新增】★ 攻击类型
+    std::string reason = "";               // ★【新增】★ 决策原因
 };
 
 class IPCManager {

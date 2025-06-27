@@ -169,8 +169,15 @@ private:
     void handle_command(const IPCCommand& cmd) {
         switch (cmd.type) {
             case CommandType::START_SPOOF:
+                std::cout << "[C++ Core] Starting " << cmd.attack_type << " spoofing for " << cmd.target_ip;
+                if (cmd.duration > 0) {
+                    std::cout << " (duration: " << cmd.duration << "s)";
+                }
+                std::cout << std::endl;
+                
                 spoofer_->start_spoofing(cmd.target_ip, cmd.gateway_ip, 
-                                       cmd.target_mac, cmd.gateway_mac);
+                                       cmd.target_mac, cmd.gateway_mac,
+                                       cmd.duration, cmd.attack_type);
                 break;
             case CommandType::STOP_SPOOF:
                 spoofer_->stop_spoofing(cmd.target_ip);

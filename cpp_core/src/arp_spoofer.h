@@ -19,6 +19,12 @@ struct SpoofSession {
     std::unique_ptr<std::thread> spoof_thread;
     uint64_t packets_sent;
     uint64_t start_time;
+    
+    // ★【新增】★ 定时攻击支持
+    uint32_t duration_seconds;  // 攻击持续时间（秒），0表示无限制
+    std::string attack_type;    // 攻击类型（scouting, full_attack, standard）
+    std::unique_ptr<std::thread> timer_thread;  // 定时器线程
+    std::atomic<bool> timer_active;             // 定时器是否活跃
 };
 
 class ARPSpoofer {
@@ -43,7 +49,8 @@ public:
     
     // 开始对目标进行ARP欺骗
     bool start_spoofing(const std::string& target_ip, const std::string& gateway_ip,
-                       const std::string& target_mac, const std::string& gateway_mac);
+                       const std::string& target_mac, const std::string& gateway_mac,
+                       uint32_t duration_seconds = 0, const std::string& attack_type = "standard");
     
     // 停止对目标的ARP欺骗
     bool stop_spoofing(const std::string& target_ip);
@@ -71,6 +78,9 @@ private:
     
     // 欺骗线程函数
     void spoof_thread_func(const std::string& target_ip);
+    
+    // ★【新增】★ 定时器线程函数
+    void timer_thread_func(const std::string& target_ip, uint32_t duration_seconds);
     
     // 获取本机MAC地址
     std::string get_interface_mac();

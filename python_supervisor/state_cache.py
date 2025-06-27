@@ -32,8 +32,8 @@ class AttackSession:
     target_ip: str
     start_time: float
     duration: int
-    attack_type: str
-    status: str = 'active'  # active, completed, failed
+    attack_type: str  # 'scouting' | 'full_attack' | 'standard'
+    status: str = 'active'  # active, completed, failed, upgraded
 
 class StateCache:
     """状态缓存管理器"""
@@ -201,6 +201,43 @@ class StateCache:
         """获取目标信息"""
         with self.target_info_lock:
             return self.target_info.get(ip)
+            
+    def get_attack_info(self, ip: str) -> Optional[Dict[str, Any]]:
+        """获取目标的当前攻击信息"""
+        with self.sessions_lock:
+            session = self.attack_sessions.get(ip)
+            if session and session.status == 'active':
+                return {
+                    'start_time': session.start_time,
+                    'attack_type': session.attack_type,
+                    'duration': session.duration,
+                    'status': session.status
+                }
+        return None
+    
+    def upgrade_attack_session(self, ip: str, new_duration: int, new_attack_type: str = 'full_attack'):
+        """升级攻击会话（从侦察模式升级到全面攻击）"""
+        current_time = time.time()
+        
+        with self.sessions_lock:
+            if ip in self.attack_sessions:
+                session = self.attack_sessions[ip]
+                # 标记原会话为已升级
+                session.status = 'upgraded'
+                
+                # 创建新的升级会话
+                new_session = AttackSession(
+                    target_ip=ip,
+                    start_time=current_time,
+                    duration=new_duration,
+                    attack_type=new_attack_type,
+                    status='active'
+                )
+                self.attack_sessions[ip] = new_session
+                
+        # 更新活跃攻击记录
+        with self.active_attacks_lock:
+            self.active_attacks[ip] = current_time
             
     def should_attack_target(self, ip: str) -> bool:
         """判断是否应该攻击目标"""

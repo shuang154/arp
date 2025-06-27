@@ -37,6 +37,25 @@ class AttackConfig:
     attack_timeout: int = 45  # seconds
     max_concurrent_attacks: int = 20
     cooldown_time: int = 3600  # seconds
+    
+    # ★【新增】★ 分级递进式攻击策略
+    strategy: 'AttackStrategyConfig' = field(default_factory=lambda: AttackStrategyConfig())
+    immediate_restore_on_success: bool = True
+
+@dataclass
+class AttackStrategyConfig:
+    """攻击策略详细配置"""
+    scouting_duration: int = 300      # 侦察窗口持续时间（秒）
+    full_attack_duration: int = 1800  # 全面攻击持续时间（秒）
+    high_value_ports: List[int] = field(default_factory=lambda: [801, 443])  # 高价值端口
+    immediate_restore_on_success: bool = True
+
+@dataclass
+class HighValueEventTrigger:
+    """高价值事件触发器"""
+    name: str
+    target_server_ip: str = ""
+    target_port: int = 0
 
 @dataclass
 class CacheConfig:
@@ -79,6 +98,9 @@ class Config:
         self.logging = LoggingConfig()
         self.web_api = WebAPIConfig()
         self.security = SecurityConfig()
+        
+        # ★【新增】★ 高价值事件触发器列表
+        self.high_value_triggers: List[HighValueEventTrigger] = []
     
     # 便捷属性
     @property
@@ -192,6 +214,15 @@ class Config:
                 config.attack.attack_timeout = attack_config.get('attack_timeout', config.attack.attack_timeout)
                 config.attack.max_concurrent_attacks = attack_config.get('max_concurrent_attacks', config.attack.max_concurrent_attacks)
                 config.attack.cooldown_time = attack_config.get('cooldown_time', config.attack.cooldown_time)
+                config.attack.immediate_restore_on_success = attack_config.get('immediate_restore_on_success', config.attack.immediate_restore_on_success)
+                
+                # ★【新增】★ 加载策略配置
+                if 'strategy' in attack_config:
+                    strategy_config = attack_config['strategy']
+                    config.attack.strategy.scouting_duration = strategy_config.get('scouting_duration', config.attack.strategy.scouting_duration)
+                    config.attack.strategy.full_attack_duration = strategy_config.get('full_attack_duration', config.attack.strategy.full_attack_duration)
+                    config.attack.strategy.high_value_ports = strategy_config.get('high_value_ports', config.attack.strategy.high_value_ports)
+                    config.attack.strategy.immediate_restore_on_success = strategy_config.get('immediate_restore_on_success', config.attack.strategy.immediate_restore_on_success)
             
             if 'cache' in yaml_data:
                 cache_config = yaml_data['cache']

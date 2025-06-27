@@ -22,7 +22,7 @@ class NJFULibraryInteractive:
         self.token = None
         self.user_info = None
         self.base_url = "https://libseat.njfu.edu.cn"
-        self.timeout = (5, 10)  # 连接超时5秒，读取超时10秒
+        self.timeout = (2, 4)  # 为ARP环境进一步减少超时：连接2秒，读取4秒
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -33,9 +33,14 @@ class NJFULibraryInteractive:
         }
 
     def safe_request(self, method, url, **kwargs):
-        """安全的HTTP请求，包含超时和重试机制"""
-        max_retries = 3
+        """安全的HTTP请求，包含超时和重试机制（为嵌入式设备优化）"""
+        global stop_flag
+        
+        max_retries = 2  # 为嵌入式设备减少重试次数
         for attempt in range(max_retries):
+            if stop_flag:
+                raise KeyboardInterrupt("收到停止信号")
+                
             try:
                 kwargs['timeout'] = self.timeout
                 response = method(url, **kwargs)
@@ -44,17 +49,58 @@ class NJFULibraryInteractive:
                 logging.warning(f"请求超时 (尝试 {attempt + 1}/{max_retries}): {url}")
                 if attempt == max_retries - 1:
                     raise
-                time.sleep(0.5 * (2 ** attempt))  # 指数回退
+                interruptible_sleep(0.5 * (2 ** attempt))  # 减少等待时间
             except requests.RequestException as e:
-                if "NameResolutionError" in str(e):
-                    logging.error(f"DNS解析失败: {url}, 错误: {e}")
-                    time.sleep(2)  # 等待后重试
+                if "NameResolutionError" in str(e) or "Temporary failure in name resolution" in str(e):
+                    logging.error(f"DNS解析失败: {url}")
+                    interruptible_sleep(3)  # DNS解析失败时减少等待时间
+                    # DNS解析失败时，快速检查网络连接
+                    if self._check_network_connectivity():
+                        logging.info("网络连接正常，可能是目标服务器问题")
+                    else:
+                        logging.warning("网络检测失败，但继续尝试")
+                    if attempt == max_retries - 1:
+                        raise
                 else:
                     logging.error(f"请求异常 (尝试 {attempt + 1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(0.5 * (2 ** attempt))
+                    if attempt == max_retries - 1:
+                        raise
+                interruptible_sleep(0.5 * (2 ** attempt))  # 减少等待时间
         return None
+
+    def _check_network_connectivity(self):
+        """检查网络连接性（极速检测，专为嵌入式设备和ARP环境优化）"""
+        global stop_flag
+        
+        if stop_flag:
+            return False
+            
+        # 使用极短超时时间，适应ARP欺骗环境
+        test_hosts = [
+            ("8.8.8.8", 53),      # Google DNS
+            ("114.114.114.114", 53),  # 114 DNS
+        ]
+        
+        for host, port in test_hosts:
+            if stop_flag:
+                return False
+            try:
+                # 极短超时：200ms，适合ARP欺骗环境
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.2)  # 200ms超时
+                result = sock.connect_ex((host, port))
+                sock.close()
+                if result == 0:
+                    return True
+            except Exception:
+                try:
+                    sock.close()
+                except:
+                    pass
+                continue
+        
+        # 所有检测都失败，直接返回False
+        return False
 
     def login(self, username, password):
         """登录系统"""
@@ -62,10 +108,12 @@ class NJFULibraryInteractive:
         try:
             # 第一个请求：获取主页
             self.safe_request(self.session.get, f"{self.base_url}/", headers=self.headers)
-            time.sleep(0.3)  # 速率限制
+            interruptible_sleep(0.8)  # 增加速率限制时间
 
             # 第二个请求：获取公钥
             response = self.safe_request(self.session.get, f"{self.base_url}/ic-web/login/publicKey", headers=self.headers)
+            if not response or response.status_code != 200:
+                return False
             data = response.json()
             public_key = data["data"]["publicKey"]
             nonce_str = data["data"]["nonceStr"]
@@ -86,10 +134,12 @@ class NJFULibraryInteractive:
                 "privacy": True
             }
 
-            time.sleep(0.3)  # 速率限制
+            interruptible_sleep(0.8)  # 增加速率限制时间
             # 第三个请求：登录
             response = self.safe_request(self.session.post, f"{self.base_url}/ic-web/login/user",
                                        json=login_data, headers=self.headers)
+            if not response or response.status_code != 200:
+                return False
             result = response.json()
 
             if result.get("code") == 0:
@@ -135,20 +185,41 @@ class NJFULibraryInteractive:
 
 
 # 全局信号量用于限制并发数
-rate_limiter = Semaphore(8)  # 最多8个并发连接
+rate_limiter = Semaphore(2)  # 降低到最多2个并发连接
 stop_flag = False  # 全局停止标志
 # 全局线程池
 executor = None
 
 
+def interruptible_sleep(seconds):
+    """可中断的睡眠函数，为ARP环境优化"""
+    global stop_flag
+    start_time = time.time()
+    while time.time() - start_time < seconds:
+        if stop_flag:
+            return
+        time.sleep(0.05)  # 每50ms检查一次中断信号（更频繁）
+
+
 def signal_handler(signum, frame):
-    """处理 Ctrl-C 信号"""
+    """处理 Ctrl-C 信号（优化版）"""
     global stop_flag, executor
+    
+    if stop_flag:  # 避免重复处理信号
+        return
+        
     stop_flag = True
-    print("\n🛑 接收到中断信号，正在优雅退出...")
+    print("\n🛑 接收到中断信号，正在快速退出...")
+    
     if executor:
-        executor.shutdown(wait=False)  # 立即关闭线程池
-    sys.exit(0)
+        try:
+            executor.shutdown(wait=False)  # 立即关闭线程池
+            print("✅ 线程池已关闭")
+        except Exception as e:
+            print(f"关闭线程池时出错: {e}")
+    
+    # 快速退出，避免线程清理问题
+    os._exit(0)
 
 
 def process_account(credentials, output_file):
@@ -170,6 +241,7 @@ def process_account(credentials, output_file):
         try:
             if library.login(username, password):
                 true_name = library.user_info.get("trueName", "未知")
+                interruptible_sleep(0.3)  # 为嵌入式设备减少延时
                 reservations = library.get_my_reservations()
                 
                 results = []
@@ -198,12 +270,17 @@ def process_account(credentials, output_file):
             logging.error(error_message)
             return {"username": username, "success": False, "error": str(e)}
         finally:
-            time.sleep(0.2)  # 全局速率限制
+            interruptible_sleep(0.7)  # 为嵌入式设备减少速率限制等待时间
 
 
 def main():
     """主程序"""
-    global executor
+    global executor, stop_flag
+    
+    # 重置全局变量
+    stop_flag = False
+    executor = None
+    
     # 设置日志
     logging.basicConfig(
         level=logging.INFO,
@@ -225,6 +302,26 @@ def main():
         print("🚀 开始处理账户信息...")
         logging.info("开始批量处理账户")
 
+        # 可选：添加快速跳过网络检测的选项
+        if "--skip-network-check" in sys.argv:
+            print("⏭️  跳过网络检测，直接开始处理")
+            logging.info("用户选择跳过网络检测")
+        else:
+            # 检查网络连接（快速检测）
+            print("🔍 正在快速检查网络连接（3秒内完成）...")
+            library_test = NJFULibraryInteractive()
+            try:
+                if not library_test._check_network_connectivity():
+                    print("⚠️  网络连接检测失败，但程序将继续运行")
+                    print("   如果遇到DNS解析问题，请检查网络设置")
+                    logging.warning("网络连接检测失败，但继续执行")
+                else:
+                    print("✅ 网络连接正常")
+                    logging.info("网络连接检测通过")
+            except Exception as e:
+                print(f"⚠️  网络检测异常: {e}，但程序将继续运行")
+                logging.warning(f"网络检测异常: {e}，但继续执行")
+
         # 读取所有账户信息
         with open(input_file, "r", encoding="utf-8") as infile:
             credentials_list = [line.strip() for line in infile if line.strip()]
@@ -233,30 +330,47 @@ def main():
 
         # 使用线程池进行并发处理
         all_results = []
-        max_workers = min(8, len(credentials_list))  # 最多8个并发线程
+        # 为嵌入式设备进一步降低并发数
+        if "--single-thread" in sys.argv:
+            max_workers = 1
+            print("🔧 使用单线程模式（适合低性能设备）")
+        else:
+            max_workers = min(2, len(credentials_list))  # 最多2个并发线程
 
         executor = ThreadPoolExecutor(max_workers=max_workers)
-        future_to_cred = {
-            executor.submit(process_account, cred, output_file): cred 
-            for cred in credentials_list
-        }
+        try:
+            future_to_cred = {
+                executor.submit(process_account, cred, output_file): cred 
+                for cred in credentials_list
+            }
 
-        completed = 0
-        for future in as_completed(future_to_cred):
-            if stop_flag:
-                break
+            completed = 0
+            for future in as_completed(future_to_cred):
+                if stop_flag:
+                    break
 
-            try:
-                result = future.result(timeout=30)  # 30秒超时
-                if result:
-                    all_results.append(result)
-                completed += 1
-                print(f"⏳ 进度: {completed}/{len(credentials_list)}")
-            except Exception as e:
-                cred = future_to_cred[future]
-                logging.error(f"处理账户失败: {cred.split()[0] if cred else 'unknown'}, 错误: {e}")
+                try:
+                    result = future.result(timeout=30)  # 为嵌入式设备减少超时时间
+                    if result:
+                        all_results.append(result)
+                    completed += 1
+                    print(f"⏳ 进度: {completed}/{len(credentials_list)}")
+                except Exception as e:
+                    cred = future_to_cred[future]
+                    username = cred.split()[0] if cred else 'unknown'
+                    logging.error(f"处理账户失败: {username}, 错误: {e}")
+                    # 添加失败的结果
+                    all_results.append({"username": username, "success": False, "error": str(e)})
 
-        executor.shutdown(wait=True)  # 确保线程池关闭
+        finally:
+            # 确保线程池正确关闭
+            if executor:
+                try:
+                    executor.shutdown(wait=False)  # 立即关闭，不等待
+                    logging.info("线程池已关闭")
+                except Exception as e:
+                    logging.error(f"关闭线程池异常: {e}")
+                executor = None
 
         # 写入结果文件
         print("📝 正在写入结果文件...")
@@ -286,7 +400,9 @@ def main():
 
     except KeyboardInterrupt:
         print("\n🛑 用户中断操作")
-        sys.exit(0)
+        if executor:
+            executor.shutdown(wait=False)
+        os._exit(0)  # 快速退出
     except FileNotFoundError:
         print(f"❌ 文件不存在: {input_file}")
         logging.error(f"输入文件不存在: {input_file}")
@@ -294,7 +410,16 @@ def main():
     except Exception as e:
         print(f"❌ 程序异常: {e}")
         logging.error(f"程序异常: {e}")
+        if executor:
+            executor.shutdown(wait=False)
         sys.exit(1)
+    finally:
+        # 最终清理
+        if executor:
+            try:
+                executor.shutdown(wait=False)
+            except:
+                pass
 
 
 if __name__ == "__main__":

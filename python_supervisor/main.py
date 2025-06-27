@@ -210,7 +210,8 @@ class PythonSupervisor:
         """执行攻击决策"""
         try:
             if decision.action == 'attack':
-                self.logger.info(f"Launching attack on {decision.target_ip}")
+                attack_log = f"Launching {decision.attack_type} attack on {decision.target_ip} for {decision.duration}s"
+                self.logger.info(attack_log)
                 self.stats['attacks_launched'] += 1
                 
                 # 发送攻击命令给C++核心
@@ -220,7 +221,9 @@ class PythonSupervisor:
                     'gateway_ip': decision.gateway_ip,
                     'target_mac': decision.target_mac,
                     'gateway_mac': decision.gateway_mac,
-                    'duration': decision.duration
+                    'duration': decision.duration,
+                    'attack_type': decision.attack_type,  # ★【新增】★ 攻击类型
+                    'reason': decision.reason
                 }
                 
                 self._send_command(command)

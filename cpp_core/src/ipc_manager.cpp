@@ -196,6 +196,12 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
         if (doc.HasMember("duration") && doc["duration"].IsUint()) {
             cmd.duration = doc["duration"].GetUint();
         }
+        if (doc.HasMember("attack_type") && doc["attack_type"].IsString()) {
+            cmd.attack_type = doc["attack_type"].GetString();
+        }
+        if (doc.HasMember("reason") && doc["reason"].IsString()) {
+            cmd.reason = doc["reason"].GetString();
+        }
         
         return cmd;
         
