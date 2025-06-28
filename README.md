@@ -128,13 +128,13 @@ CPU占用: 30-40% (平稳)
 ```yaml
 Scout配置:
   最大并发: 30个
-  启动速率: 4个/秒
+  启动速率: 6个/秒 (优化后)
   随机延迟: 10-100ms
 
 Attack配置:
   最大并发: 15个  
-  启动速率: 2个/秒
-  令牌补充: 2个/秒
+  启动速率: 3个/秒 (优化后)
+  令牌补充: 3个/秒 (优化后)
 
 线程配置:
   工作线程: 4个
@@ -146,13 +146,13 @@ Attack配置:
 ```yaml
 Scout配置:
   最大并发: 50个
-  启动速率: 8个/秒
+  启动速率: 12个/秒 (优化后)
   随机延迟: 10-100ms
 
 Attack配置:
   最大并发: 25个
-  启动速率: 4个/秒  
-  令牌补充: 4个/秒
+  启动速率: 6个/秒 (优化后)
+  令牌补充: 6个/秒 (优化后)
 
 线程配置:
   工作线程: 8个
@@ -170,7 +170,7 @@ Attack配置:
 ### v2.0 启动流程  
 ```
 发现100个设备 → Scout发射器排队 → 错峰启动(10-100ms延迟) → 
-每125ms启动一个 → 12.5秒内完成全部启动 → 系统稳定运行
+每166ms启动一个(6/s) → 16.7秒内完成全部启动 → 系统稳定运行
 ```
 
 ## 📈 监控指标
@@ -213,6 +213,129 @@ Attack配置:
 - ✅ Scout容量从20-30个提升到30-50个
 - ✅ 支持香橙派等ARM平台高效运行
 
+## 🚨 故障排除
+
+### 常见问题及解决方案
+
+#### 1. `'PythonSupervisor' object has no attribute 'logger'`
+**原因：** 初始化顺序问题，logger在其他组件之前未正确设置
+**解决：** 
+```bash
+# 确保main.py中logger初始化在最前面
+# 已在v2.0中修复，重新启动即可
+./scripts/launch.sh
+```
+
+#### 2. 心跳超时警告仍然出现
+**检查步骤：**
+```bash
+# 1. 确认平台检测
+grep "ARM platform detected" /var/log/arp_spoofer.log
+
+# 2. 检查Scout启动速率
+grep "Scout launched" /var/log/arp_spoofer.log | head -10
+
+# 3. 监控并发状态
+grep "🎫 Tokens:" /var/log/arp_spoofer.log
+```
+
+#### 3. 性能仍然不佳
+**调优建议：**
+```python
+# 进一步降低ARM平台参数 (attack_coordinator.py)
+if self.is_arm_platform:
+    scout_max = 20      # 从30降至20
+    scout_rate = 2      # 从4降至2
+    attack_max = 10     # 从15降至10
+```
+
+#### 4. 依赖包缺失
+```bash
+# 安装必要的Python包
+pip install -r python_supervisor/requirements.txt
+
+# 如果仍有问题，手动安装
+pip install zmq dataclasses typing
+```
+
+### 日志监控命令
+
+#### 实时监控性能
+```bash
+# 查看Scout启动情况
+tail -f /var/log/arp_spoofer.log | grep "🚀 Scout launched"
+
+# 监控心跳状态  
+tail -f /var/log/arp_spoofer.log | grep "HEARTBEAT"
+
+# 查看并发控制状态
+tail -f /var/log/arp_spoofer.log | grep "🎫 Tokens"
+```
+
+#### 性能分析
+```bash
+# 统计启动速率
+grep "Scout launched" /var/log/arp_spoofer.log | awk '{print $1, $2}' | uniq -c
+
+# 计算平均心跳延迟
+grep "PONG sent" /var/log/arp_spoofer.log | wc -l
+
+# 检查CPU使用情况
+top -p $(pgrep -f "python.*main.py")
+```
+
+## 🔧 高级配置
+
+### 手动参数调优
+如需针对特定硬件进一步优化，可修改 `attack_coordinator.py`：
+
+```python
+# 超低性能设备配置
+if platform.machine().startswith(('arm', 'aarch')):
+    scout_max = 15      # 极保守配置
+    scout_rate = 2      # 每秒2个
+    attack_max = 8      # 最多8个攻击
+```
+
+### 性能监控脚本
+创建监控脚本 `monitor.sh`：
+```bash
+#!/bin/bash
+while true; do
+    echo "=== $(date) ==="
+    echo "CPU使用率: $(top -bn1 | grep "python.*main.py" | awk '{print $9}')%"
+    echo "内存使用: $(ps -o pid,vsz,rss,comm -p $(pgrep -f "python.*main.py"))"
+    echo "Scout状态: $(tail -20 /var/log/arp_spoofer.log | grep "🚀 Scout" | tail -1)"
+    echo "心跳状态: $(tail -10 /var/log/arp_spoofer.log | grep "HEARTBEAT" | tail -1)"
+    echo "------------------------"
+    sleep 30
+done
+```
+
 ---
 
 *ARP Spoofer Pro v2.0 - 专为ARM平台优化的高性能网络安全工具*
+
+## 🎯 v2.1 性能调优
+
+### 📈 优化后的并发参数
+基于实际测试和错峰机制的稳定性，我们适当提高了并发参数：
+
+**ARM平台提升：**
+- Scout启动速率：4/s → 6/s (+50%)
+- Attack令牌补充：2/s → 3/s (+50%)
+
+**x86平台提升：**
+- Scout启动速率：8/s → 12/s (+50%) 
+- Attack令牌补充：4/s → 6/s (+50%)
+
+### 🚀 性能提升原理
+1. **错峰机制保障**：10-100ms随机延迟确保不会瞬间爆发
+2. **令牌桶平滑**：避免突发流量冲击系统
+3. **去重机制**：防止重复命令造成资源浪费
+4. **平台自适应**：ARM保持保守配置，x86充分利用性能
+
+### ⚠️ 调优建议
+- 如系统仍有CPU余量，可继续提升速率
+- 监控心跳状态，如出现超时则适当降低
+- ARM平台建议不超过8/s (Scout) 和 5/s (Attack)

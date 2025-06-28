@@ -40,10 +40,34 @@ attack:
   stealth_mode: false            # 隐蔽模式
   attack_timeout: 45             # 攻击超时时间(秒)
   # ★【修改】★ 分离Scout和Attack的并发限制
-  max_scout_attacks: 100         # Scout侦察最大并发数
-  max_active_attacks: 40         # Attack攻击最大并发数
+  max_scout_attacks: 100         # Scout侦察最大并发数（全局，实际在下面并发控制配置中修改）
+  max_active_attacks: 40         # Attack攻击最大并发数（全局，实际在下面并发控制配置中修改）
   #max_concurrent_attacks: 40     # 旧配置(向后兼容，已废弃)
   cooldown_time: 3600           # 冷却时间(秒)
+  
+  # ★【新增】★ 并发控制配置
+  concurrency_control:
+    # Scout并发控制
+    scout_max_x86: 50             # x86平台Scout最大并发数
+    scout_max_arm: 30             # ARM平台Scout最大并发数
+    scout_launch_rate_x86: 12     # x86平台Scout每秒启动数 (提升到12/s)
+    scout_launch_rate_arm: 6      # ARM平台Scout每秒启动数 (提升到6/s)
+    
+    # Attack并发控制
+    attack_max_x86: 25            # x86平台Attack最大并发数
+    attack_max_arm: 15            # ARM平台Attack最大并发数
+    attack_refill_rate_x86: 6     # x86平台Attack令牌桶补充速率/秒 (提升到6/s)
+    attack_refill_rate_arm: 3     # ARM平台Attack令牌桶补充速率/秒 (提升到3/s)
+    
+    # 去重控制
+    event_dedup_ttl_x86: 5        # x86平台事件去重TTL(秒)
+    event_dedup_ttl_arm: 5        # ARM平台事件去重TTL(秒)
+    command_dedup_ttl_x86: 3      # x86平台命令去重TTL(秒)
+    command_dedup_ttl_arm: 3      # ARM平台命令去重TTL(秒)
+    
+    # 随机延迟控制
+    random_delay_min_ms: 10       # 最小随机延迟(毫秒)
+    random_delay_max_ms: 100      # 最大随机延迟(毫秒)
   
   # ★【增强】★ 分级递进式攻击策略
   strategy:

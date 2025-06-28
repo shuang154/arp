@@ -39,6 +39,9 @@ class PythonSupervisor:
         self.config = config
         self.running = False
         
+        # ★【修复】★ 首先设置日志系统
+        self._setup_logging()
+        
         # ZMQ上下文和套接字
         self.context = zmq.Context()
         # ★【新增】★ 独立的心跳ZMQ上下文，避免GIL争用
@@ -49,8 +52,22 @@ class PythonSupervisor:
         self.heartbeat_sender = None    # ★【新增】★ 心跳线程专用发送通道
         self.heartbeat_sender_dedicated = None  # ★【新增】★ 独立心跳上下文的发送通道
         
+        # ★【ARM优化】★ 检测平台并调整参数
+        self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
+        self.cache_ttl = 2  # TTL时间
+        
+        if self.is_arm_platform:
+            # ARM平台保守配置
+            max_threads = min(config.max_worker_threads, 4)  # 限制为4线程
+            queue_size = 500    # 减小队列
+            self.logger.info("🔧 ARM platform detected, using conservative settings")
+        else:
+            # x86平台正常配置
+            max_threads = min(config.max_worker_threads, 8)
+            queue_size = 1000
+        
         # ★【新增】★ 批量命令处理
-        self.command_queue = queue.Queue(maxsize=1000)
+        self.command_queue = queue.Queue(maxsize=queue_size)
         self.command_processor_thread = None
         self.command_processor_running = False
         
@@ -65,21 +82,6 @@ class PythonSupervisor:
         self.heartbeat_thread = None
         self.heartbeat_running = False
         
-        # ★【ARM优化】★ 检测平台并调整参数
-        self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
-        if self.is_arm_platform:
-            # ARM平台保守配置
-            max_threads = min(config.max_worker_threads, 4)  # 限制为4线程
-            self.command_queue = queue.Queue(maxsize=500)    # 减小队列
-            self.recent_packets_cache = {}  # 简化缓存，使用字典替代TTLCache
-            self.cache_ttl = 2  # TTL时间
-            self.logger.info("🔧 ARM platform detected, using conservative settings")
-        else:
-            # x86平台正常配置
-            max_threads = min(config.max_worker_threads, 8)
-            self.command_queue = queue.Queue(maxsize=1000)
-            self.recent_packets_cache = {}
-            self.cache_ttl = 2
         self.thread_pool = ThreadPoolExecutor(
             max_workers=max_threads,
             thread_name_prefix="PacketWorker"
@@ -105,15 +107,11 @@ class PythonSupervisor:
         # 简化缓存实现，避免外部依赖
         self.recent_packets_cache = {}
         self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
-        self.cache_ttl = self.cache_ttl if hasattr(self, 'cache_ttl') else 2
         
         # ★【优化】★ HTTP凭据级别的去重缓存，减少大小
         self.http_credentials_cache = {}
         self.http_cache_lock = threading.Lock()
         self.http_cache_ttl = 8  # 8秒TTL
-        
-        # 设置日志
-        self._setup_logging()
         
     def _setup_logging(self):
         """设置日志系统"""
@@ -669,15 +667,55 @@ class PythonSupervisor:
     
     def _heartbeat_loop(self):
         """心跳监听循环 - 高优先级，确保及时响应"""
-        # ★【紧急修复】★ 设置线程优先级 - Windows兼容
+        # ★【跨平台修复】★ 设置线程优先级
+        self._set_thread_priority_high()
+            
+    def _set_thread_priority_high(self):
+        """跨平台设置线程高优先级"""
         try:
-            import ctypes
+            import os
+            import platform
             import threading
-            # 提升线程优先级到高于正常
-            ctypes.windll.kernel32.SetThreadPriority(
-                ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_ABOVE_NORMAL
-        except:
-            pass  # 如果设置失败就忽略
+            
+            system = platform.system().lower()
+            if system == "windows":
+                # Windows平台
+                import ctypes
+                ctypes.windll.kernel32.SetThreadPriority(
+                    ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_ABOVE_NORMAL
+                self.logger.debug("Windows thread priority set to high")
+            elif system == "linux":
+                # Linux平台 (包括ARM设备)
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL("libc.so.6")
+                    # 设置nice值为-10 (较高优先级)
+                    libc.setpriority(0, 0, -10)  # PRIO_PROCESS, 当前进程, nice值
+                    self.logger.debug("Linux thread priority set to high (nice -10)")
+                except Exception as e:
+                    # 尝试通过os.nice设置进程优先级
+                    try:
+                        current_nice = os.nice(0)
+                        if current_nice > -10:
+                            os.nice(-10 - current_nice)
+                        self.logger.debug(f"Linux process nice set from {current_nice} to {os.nice(0)}")
+                    except Exception as e2:
+                        self.logger.warning(f"Failed to set Linux priority: {e}, {e2}")
+            elif system == "darwin":
+                # macOS平台
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL("/usr/lib/libc.dylib")
+                    libc.setpriority(0, 0, -10)  # 设置较高优先级
+                    self.logger.debug("macOS thread priority set to high")
+                except Exception as e:
+                    self.logger.warning(f"Failed to set macOS priority: {e}")
+            else:
+                self.logger.warning(f"Unknown platform {system}, skipping priority setting")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to set thread priority: {e}")
+            # 继续执行，不因为优先级设置失败而中断
             
         heartbeat_failures = 0
         last_heartbeat_time = time.time()
