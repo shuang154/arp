@@ -159,46 +159,46 @@ class PythonSupervisor:
     def _init_zmq(self) -> bool:
         """初始化ZMQ通信"""
         try:
-            # ★【优化】★ ZMQ缓冲区配置，提高性能
-            # 接收数据包的套接字（PULL模式）
+            # 1. Packet Receiver (C++ PUSH -> Python PULL)
             self.packet_receiver = self.context.socket(zmq.PULL)
-            self.packet_receiver.bind(self.config.packet_ipc_address)
-            self.packet_receiver.setsockopt(zmq.RCVTIMEO, 500)  # ★【优化】★ 减少超时时间
-            self.packet_receiver.setsockopt(zmq.RCVHWM, 1000)  # ★【新增】★ 高水位标记
-            
-            # 发送命令的套接字（PUSH模式）
-            # ★【关键修复】★ 命令发送socket - Python端bind，C++端connect接收PONG
+            self.packet_receiver.bind(self.config.get('ipc.packet_address'))
+            self.packet_receiver.setsockopt(zmq.RCVTIMEO, 500)
+            self.packet_receiver.setsockopt(zmq.RCVHWM, 2000) # 增加缓冲区
+
+            # 2. Command Sender (Python PUSH -> C++ PULL)
             self.command_sender = self.context.socket(zmq.PUSH)
-            self.command_sender.bind(self.config.command_ipc_address)
-            self.command_sender.setsockopt(zmq.SNDTIMEO, 500)  # ★【优化】★ 减少超时时间
-            self.command_sender.setsockopt(zmq.SNDHWM, 10)     # ★【关键】★ 低高水位标记，防止PONG堆积
-            
-            # ★【关键修复】★ 心跳接收socket - Python端bind，C++端connect发送PING
+            # ★【关键修复】★ Python作为客户端，应该connect
+            self.command_sender.connect(self.config.get('ipc.command_address'))
+            self.command_sender.setsockopt(zmq.SNDTIMEO, 500)
+            self.command_sender.setsockopt(zmq.SNDHWM, 100)
+
+            # 3. Heartbeat PING Receiver (C++ PUSH -> Python PULL)
             self.heartbeat_receiver = self.heartbeat_context.socket(zmq.PULL)
-            self.heartbeat_receiver.bind(self.config.ipc.heartbeat_address)
-            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 50)   # ★【优化】★ 更短超时，高响应
-            self.heartbeat_receiver.setsockopt(zmq.RCVHWM, 10)     # ★【关键】★ 低高水位，防止PING堆积
-            
-            # ★【关键修复】★ 心跳回复专用socket - Python端connect，C++端bind接收PONG
+            self.heartbeat_receiver.bind(self.config.get('ipc.heartbeat_address'))
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 1000) # 心跳接收可以等待更久
+            self.heartbeat_receiver.setsockopt(zmq.RCVHWM, 10)
+
+            # 4. Heartbeat PONG Sender (Python PUSH -> C++ PULL)
             self.heartbeat_sender = self.heartbeat_context.socket(zmq.PUSH)
-            self.heartbeat_sender.connect(self.config.command_ipc_address)
-            self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 200)    # ★【优化】★ 快速超时
-            self.heartbeat_sender.setsockopt(zmq.SNDHWM, 5)        # ★【关键】★ 极低高水位
-            self.heartbeat_sender.setsockopt(zmq.LINGER, 0)        # ★【关键】★ 快速关闭
-            
-            self.logger.info(f"ZMQ sockets initialized:")
-            self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
-            self.logger.info(f"  - Command sender: {self.config.command_ipc_address} (bind for PONG)")
-            self.logger.info(f"  - Heartbeat receiver: {self.config.ipc.heartbeat_address} (bind for PING)")
-            self.logger.info(f"  - Heartbeat sender: {self.config.command_ipc_address} (connect for PONG)")
-            self.logger.info(f"🫀 Heartbeat通道配对完成：C++端PING→Python端，Python端PONG→C++端")
+            # ★【关键修复】★ 连接到专用的PONG接收地址
+            self.heartbeat_sender.connect(self.config.get('ipc.heartbeat_pong_address'))
+            self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 200)
+            self.heartbeat_sender.setsockopt(zmq.SNDHWM, 10)
+            self.heartbeat_sender.setsockopt(zmq.LINGER, 0)
+
+            self.logger.info("ZMQ sockets initialized with correct roles:")
+            self.logger.info(f"  - Packet Receiver [PULL-BIND]   @ {self.config.get('ipc.packet_address')}")
+            self.logger.info(f"  - Command Sender  [PUSH-CONNECT] @ {self.config.get('ipc.command_address')}")
+            self.logger.info(f"  - Heartbeat PING  [PULL-BIND]   @ {self.config.get('ipc.heartbeat_address')}")
+            self.logger.info(f"  - Heartbeat PONG  [PUSH-CONNECT] @ {self.config.get('ipc.heartbeat_pong_address')}")
+            self.logger.info("🫀 All IPC channels are correctly configured.")
             
             return True
             
         except Exception as e:
             self.logger.error(f"Failed to initialize ZMQ: {e}")
             return False
-            
+
     def run(self):
         """运行主循环"""
         self.running = True

@@ -12,11 +12,12 @@ network:
 ipc:
   packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
   command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
-  # ★【新增】★ 独立心跳通道
-  heartbeat_address: "ipc:///tmp/arp_spoofer_heartbeat.ipc"
+  # ★【修改】★ 拆分PING和PONG地址
+  heartbeat_address: "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc" # C++ -> Python (PING)
+  heartbeat_pong_address: "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc" # Python -> C++ (PONG)
   # ★【新增】★ 心跳配置
   heartbeat_interval: 5000       # 心跳间隔(ms)
-  heartbeat_timeout: 15000       # 心跳超时(ms)
+  heartbeat_timeout: 20000       # 心跳超时(ms) - 适当延长以应对启动延迟
 
 # 性能配置 (香橙派优化)
 performance:

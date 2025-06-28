@@ -39,7 +39,18 @@ public:
         int cooldown_time = 3600;
     };
     
+    // ★【新增】★ IPC配置
+    struct IPCConfig {
+        std::string packet_address = "ipc:///tmp/arp_spoofer_packets.ipc";
+        std::string command_address = "ipc:///tmp/arp_spoofer_commands.ipc";
+        std::string heartbeat_address = "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc";
+        std::string heartbeat_pong_address = "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc";
+        int heartbeat_interval = 5000;   // ms
+        int heartbeat_timeout = 20000; // ms
+    };
+
     struct Config {
+        IPCConfig ipc; // ★ 使用新的IPCConfig结构体
         NetworkConfig network;
         PerformanceConfig performance;
         AttackConfig attack;
@@ -80,6 +91,14 @@ public:
     NetworkConfig get_network_config() const;
     PerformanceConfig get_performance_config() const;
     AttackConfig get_attack_config() const;
+
+    // ★【新增】★ IPC配置的Getters
+    std::string get_packet_address() const;
+    std::string get_command_address() const;
+    std::string get_heartbeat_address() const;
+    std::string get_heartbeat_pong_address() const;
+    int get_heartbeat_interval() const;
+    int get_heartbeat_timeout() const;
     
     // 配置变化监听
     void start_monitoring();

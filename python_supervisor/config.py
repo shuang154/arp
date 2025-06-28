@@ -22,9 +22,11 @@ class IPCConfig:
     """IPC通信配置"""
     packet_address: str = "ipc:///tmp/arp_spoofer_packets.ipc"
     command_address: str = "ipc:///tmp/arp_spoofer_commands.ipc"
-    heartbeat_address: str = "ipc:///tmp/arp_spoofer_heartbeat.ipc"  # ★【新增】★ 心跳专用通道
+    # ★【修改】★ 拆分PING和PONG地址
+    heartbeat_address: str = "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc"      # C++ -> Python (PING)
+    heartbeat_pong_address: str = "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc" # Python -> C++ (PONG)
     heartbeat_interval: int = 5000    # 心跳间隔(ms)
-    heartbeat_timeout: int = 15000    # 心跳超时(ms)
+    heartbeat_timeout: int = 20000    # 心跳超时(ms)
 
 @dataclass
 class PerformanceConfig:
@@ -295,8 +297,9 @@ class Config:
                 ipc_config = yaml_data['ipc']
                 config.ipc.packet_address = ipc_config.get('packet_address', config.ipc.packet_address)
                 config.ipc.command_address = ipc_config.get('command_address', config.ipc.command_address)
-                # ★【新增】★ 心跳配置解析
+                # ★【修改】★ 解析PING和PONG地址
                 config.ipc.heartbeat_address = ipc_config.get('heartbeat_address', config.ipc.heartbeat_address)
+                config.ipc.heartbeat_pong_address = ipc_config.get('heartbeat_pong_address', config.ipc.heartbeat_pong_address)
                 config.ipc.heartbeat_interval = ipc_config.get('heartbeat_interval', config.ipc.heartbeat_interval)
                 config.ipc.heartbeat_timeout = ipc_config.get('heartbeat_timeout', config.ipc.heartbeat_timeout)
             

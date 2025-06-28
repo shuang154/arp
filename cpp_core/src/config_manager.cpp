@@ -2,9 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
-#include <csignal>
-#include <algorithm>
-#include <regex>
+#include <yaml-cpp/yaml.h>
 
 ConfigManager::ConfigManager(const std::string& config_file) 
     : config_file_(config_file), monitoring_(false) {
@@ -14,7 +12,7 @@ ConfigManager::ConfigManager(const std::string& config_file)
     // 获取初始文件修改时间
     try {
         if (std::filesystem::exists(config_file_)) {
-            last_modified_ = get_file_modification_time(config_file_);
+            last_modified_ = std::filesystem::last_write_time(config_file_);
         }
     } catch (const std::exception& e) {
         std::cerr << "Warning: Cannot get file modification time: " << e.what() << std::endl;
@@ -29,36 +27,31 @@ bool ConfigManager::load_config() {
     std::lock_guard<std::mutex> lock(config_mutex_);
     
     if (!std::filesystem::exists(config_file_)) {
-        std::cerr << "Config file not found: " << config_file_ << std::endl;
-        std::cerr << "Using default configuration" << std::endl;
-        return true; // 使用默认配置
+        std::cerr << "Config file not found: " << config_file_ << ". Using default configuration." << std::endl;
+        current_config_ = Config{}; // 使用默认值
+        return true; 
     }
     
-    std::ifstream file(config_file_);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open config file: " << config_file_ << std::endl;
+    try {
+        std::ifstream file(config_file_);
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string content = buffer.str();
+        
+        Config new_config;
+        if (!parse_yaml_config(content, new_config)) {
+            std::cerr << "Failed to parse config file, using previous or default config." << std::endl;
+            return false;
+        }
+        
+        current_config_ = new_config;
+        std::cout << "Configuration loaded successfully from " << config_file_ << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading config file: " << e.what() << std::endl;
         return false;
     }
-    
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string content = buffer.str();
-    
-    Config new_config;
-    if (!parse_yaml_config(content, new_config)) {
-        std::cerr << "Failed to parse config file" << std::endl;
-        return false;
-    }
-    
-    if (!validate_config(new_config)) {
-        std::cerr << "Config validation failed" << std::endl;
-        return false;
-    }
-    
-    current_config_ = new_config;
-    std::cout << "Configuration loaded successfully" << std::endl;
-    
-    return true;
 }
 
 bool ConfigManager::reload_config() {
@@ -88,20 +81,37 @@ ConfigManager::Config ConfigManager::get_config() const {
     return current_config_;
 }
 
-ConfigManager::NetworkConfig ConfigManager::get_network_config() const {
+// ★【实现】★ IPC 配置的 Getters
+std::string ConfigManager::get_packet_address() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
-    return current_config_.network;
+    return current_config_.ipc.packet_address;
 }
 
-ConfigManager::PerformanceConfig ConfigManager::get_performance_config() const {
+std::string ConfigManager::get_command_address() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
-    return current_config_.performance;
+    return current_config_.ipc.command_address;
 }
 
-ConfigManager::AttackConfig ConfigManager::get_attack_config() const {
+std::string ConfigManager::get_heartbeat_address() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
-    return current_config_.attack;
+    return current_config_.ipc.heartbeat_address;
 }
+
+std::string ConfigManager::get_heartbeat_pong_address() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.heartbeat_pong_address;
+}
+
+int ConfigManager::get_heartbeat_interval() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.heartbeat_interval;
+}
+
+int ConfigManager::get_heartbeat_timeout() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.heartbeat_timeout;
+}
+
 
 void ConfigManager::start_monitoring() {
     if (monitoring_) {
@@ -240,78 +250,63 @@ void ConfigManager::monitor_loop() {
     }
 }
 
+// ★【重构】★ 使用 yaml-cpp 解析配置
 bool ConfigManager::parse_yaml_config(const std::string& content, Config& config) {
-    // 简化的YAML解析器 - 支持基本的键值对
-    std::istringstream stream(content);
-    std::string line;
-    std::string current_section;
-    
-    while (std::getline(stream, line)) {
-        // 移除前后空白
-        line.erase(0, line.find_first_not_of(" \t"));
-        line.erase(line.find_last_not_of(" \t") + 1);
-        
-        // 跳过空行和注释
-        if (line.empty() || line[0] == '#') {
-            continue;
+    try {
+        YAML::Node root = YAML::Load(content);
+
+        // 解析 ipc 部分
+        if (root["ipc"]) {
+            const auto& ipc_node = root["ipc"];
+            config.ipc.packet_address = ipc_node["packet_address"].as<std::string>(config.ipc.packet_address);
+            config.ipc.command_address = ipc_node["command_address"].as<std::string>(config.ipc.command_address);
+            config.ipc.heartbeat_address = ipc_node["heartbeat_address"].as<std::string>(config.ipc.heartbeat_address);
+            config.ipc.heartbeat_pong_address = ipc_node["heartbeat_pong_address"].as<std::string>(config.ipc.heartbeat_pong_address);
+            config.ipc.heartbeat_interval = ipc_node["heartbeat_interval"].as<int>(config.ipc.heartbeat_interval);
+            config.ipc.heartbeat_timeout = ipc_node["heartbeat_timeout"].as<int>(config.ipc.heartbeat_timeout);
         }
-        
-        // 检查是否为section
-        if (line.back() == ':' && line.find(' ') == std::string::npos) {
-            current_section = line.substr(0, line.length() - 1);
-            continue;
-        }
-        
-        // 解析键值对
-        size_t colon_pos = line.find(':');
-        if (colon_pos != std::string::npos) {
-            std::string key = line.substr(0, colon_pos);
-            std::string value = line.substr(colon_pos + 1);
+
+        // 解析 network 部分
+        if (root["network"]) {
+            const auto& network_node = root["network"];
+            config.network.interface = network_node["interface"].as<std::string>(config.network.interface);
+            config.network.gateway_ip = network_node["gateway_ip"].as<std::string>(config.network.gateway_ip);
+            config.network.target_server = network_node["target_server"].as<std::string>(config.network.target_server);
             
-            // 移除空白
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            value.erase(0, value.find_first_not_of(" \t"));
-            value.erase(value.find_last_not_of(" \t") + 1);
-            
-            // 根据section和key设置配置
-            if (current_section == "network") {
-                if (key == "interface") config.network.interface = value;
-                else if (key == "gateway_ip") config.network.gateway_ip = value;
-                else if (key == "target_server") config.network.target_server = value;
-                else if (key == "target_ports") {
-                    // 解析端口列表 [80, 443, 8080]
-                    config.network.target_ports.clear();
-                    std::regex port_regex(R"(\d+)");
-                    std::sregex_iterator iter(value.begin(), value.end(), port_regex);
-                    std::sregex_iterator end;
-                    
-                    for (; iter != end; ++iter) {
-                        config.network.target_ports.push_back(std::stoi(iter->str()));
-                    }
+            // 解析端口列表
+            if (network_node["target_ports"]) {
+                config.network.target_ports.clear();
+                for (const auto& port : network_node["target_ports"]) {
+                    config.network.target_ports.push_back(port.as<int>());
                 }
-            } else if (current_section == "performance") {
-                if (key == "max_worker_threads") config.performance.max_worker_threads = std::stoi(value);
-                else if (key == "packet_buffer_size") config.performance.packet_buffer_size = std::stoull(value);
-                else if (key == "command_timeout") config.performance.command_timeout = std::stoi(value);
-            } else if (current_section == "attack") {
-                if (key == "stealth_mode") config.attack.stealth_mode = (value == "true" || value == "1");
-                else if (key == "attack_timeout") config.attack.attack_timeout = std::stoi(value);
-                else if (key == "max_concurrent_attacks") config.attack.max_concurrent_attacks = std::stoi(value);
-                else if (key == "cooldown_time") config.attack.cooldown_time = std::stoi(value);
-            } else if (current_section.empty()) {
-                // 顶级配置
-                if (key == "log_level") config.log_level = value;
-                else if (key == "web_api_port") config.web_api_port = std::stoi(value);
-                else if (key == "enable_cpu_binding") config.enable_cpu_binding = (value == "true" || value == "1");
-                else if (key == "sniffer_cpu") config.sniffer_cpu = std::stoi(value);
-                else if (key == "ipc_cpu") config.ipc_cpu = std::stoi(value);
-                else if (key == "main_cpu") config.main_cpu = std::stoi(value);
             }
         }
+
+        // 解析 performance 部分
+        if (root["performance"]) {
+            const auto& performance_node = root["performance"];
+            config.performance.max_worker_threads = performance_node["max_worker_threads"].as<int>(config.performance.max_worker_threads);
+            config.performance.packet_buffer_size = performance_node["packet_buffer_size"].as<size_t>(config.performance.packet_buffer_size);
+            config.performance.command_timeout = performance_node["command_timeout"].as<int>(config.performance.command_timeout);
+        }
+
+        // 解析 attack 部分
+        if (root["attack"]) {
+            const auto& attack_node = root["attack"];
+            config.attack.stealth_mode = attack_node["stealth_mode"].as<bool>(config.attack.stealth_mode);
+            config.attack.attack_timeout = attack_node["attack_timeout"].as<int>(config.attack.attack_timeout);
+            config.attack.max_concurrent_attacks = attack_node["max_concurrent_attacks"].as<int>(config.attack.max_concurrent_attacks);
+            config.attack.cooldown_time = attack_node["cooldown_time"].as<int>(config.attack.cooldown_time);
+        }
+
+        // 解析日志级别
+        config.log_level = root["log_level"].as<std::string>(config.log_level);
+
+        return true;
+    } catch (const YAML::Exception& e) {
+        std::cerr << "Failed to parse YAML config: " << e.what() << std::endl;
+        return false;
     }
-    
-    return true;
 }
 
 void ConfigManager::notify_callbacks(const Config& config) {

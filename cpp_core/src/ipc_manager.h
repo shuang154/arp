@@ -9,6 +9,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include "config_manager.h" // ★ 包含config manager
 
 // 数据包类型枚举
 enum class PacketType {
@@ -75,41 +76,22 @@ struct IPCCommand {
     std::string reason = "";               // ★【新增】★ 决策原因
 };
 
-class IPCManager {
-private:
-    std::unique_ptr<zmq::context_t> context_;
-    std::unique_ptr<zmq::context_t> heartbeat_context_; // ★【新增】★ 独立心跳context
-    std::unique_ptr<zmq::socket_t> packet_sender_;    // 发送数据包给Python
-    std::unique_ptr<zmq::socket_t> command_sender_;   // ★【修复】★ 心跳PING发送通道
-    std::unique_ptr<zmq::socket_t> command_receiver_; // ★【修复】★ 心跳PONG接收通道
-    
-    bool initialized_;
-    uint64_t packets_sent_;
-    uint64_t commands_received_;
-    
-    // ★【新增】★ 心跳机制
-    std::atomic<bool> heartbeat_running_;
-    std::unique_ptr<std::thread> heartbeat_thread_;
-    std::chrono::steady_clock::time_point last_ping_time_;
-    std::chrono::steady_clock::time_point last_pong_time_;
-    std::function<void()> connection_lost_callback_;
-    
-    static constexpr int HEARTBEAT_INTERVAL_MS = 5000;    // 5秒发送一次心跳（提高频率）
-    static constexpr int HEARTBEAT_TIMEOUT_MS = 60000;   // 60秒超时（增加容忍度）
 
+class IPCManager {
 public:
-    IPCManager();
+    // ★【修改】★ 构造函数接收ConfigManager，不再需要单独的init
+    IPCManager(const ConfigManager& config);
     ~IPCManager();
-    
-    bool initialize();
-    void shutdown();
-    
-    // 发送数据包给Python层
-    bool send_packet(const PacketInfo& packet);
-    
-    // 接收Python层的命令
+
+    // 禁止拷贝和赋值
+    IPCManager(const IPCManager&) = delete;
+    IPCManager& operator=(const IPCManager&) = delete;
+
+    // ★【修改】★ receive_command现在只接收业务命令
     std::optional<IPCCommand> receive_command(int timeout_ms = 1);
     
+    bool send_packet(const PacketInfo& packet);
+
     // ★【新增】★ 心跳相关方法
     void start_heartbeat();
     void stop_heartbeat();
@@ -131,17 +113,39 @@ public:
     HeartbeatStatus get_heartbeat_status() const;
 
 private:
+    void heartbeat_thread_func();
+    void handle_pong();
+
+    // ★【修改】★ 序列化/反序列化移到私有
     std::string serialize_packet(const PacketInfo& packet);
     std::optional<IPCCommand> deserialize_command(const std::string& data);
+
+    const ConfigManager& config_; // ★【新增】★ 持有配置引用
+
+    // ★【修改】★ 拆分不同的ZMQ Context和Socket
+    std::unique_ptr<zmq::context_t> main_context_;
+    std::unique_ptr<zmq::context_t> heartbeat_context_;
+
+    std::unique_ptr<zmq::socket_t> packet_sender_;      // PUSH to python (packets)
+    std::unique_ptr<zmq::socket_t> command_receiver_;   // PULL from python (commands)
     
-    // ★【新增】★ 心跳相关私有方法
-    void heartbeat_loop();
-    bool send_ping();
-    void handle_pong();
+    // ★【修改】★ 明确心跳通道的 PING 发送和 PONG 接收
+    std::unique_ptr<zmq::socket_t> heartbeat_ping_sender_; // PUSH to python (PING)
+    std::unique_ptr<zmq::socket_t> heartbeat_pong_receiver_; // PULL from python (PONG)
+
+    std::atomic<bool> shutdown_flag_{false};
+
+    // Heartbeat state
+    std::thread heartbeat_thread_;
+    std::atomic<bool> heartbeat_running_{false};
+    std::atomic<std::chrono::steady_clock::time_point> last_pong_time_;
+    std::function<void()> connection_lost_callback_;
     
-    // 心跳统计
-    std::atomic<uint64_t> pings_sent_;
-    std::atomic<uint64_t> pongs_received_;
+    // Stats
+    std::atomic<uint64_t> packets_sent_{0};
+    std::atomic<uint64_t> commands_received_{0};
+    std::atomic<uint64_t> pings_sent_{0};
+    std::atomic<uint64_t> pongs_received_{0};
 };
 
 #endif // IPC_MANAGER_H
