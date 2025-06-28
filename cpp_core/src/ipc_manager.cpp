@@ -86,32 +86,33 @@ void IPCManager::heartbeat_thread_func() {
     while (!shutdown_flag_) {
         auto now = std::chrono::steady_clock::now();
 
-        // 1. 发送 PING (JSON格式) - ★【修复】★ 深拷贝+阻塞发送+EHOSTUNREACH捕获
+        // 1. 发送 PING (JSON格式) - ★【修复】★ 深拷贝+阻塞发送+成功才更新时间戳
         if (now - last_ping_time > ping_interval) {
+            // ★【修复】★ 构建标准JSON格式的PING消息
+            const std::string ping_json = R"({"type":"PING","timestamp":)" + 
+                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()) +
+                R"(,"sequence":)" + std::to_string(pings_sent_.load()) + "}";
+            
             try {
-                // ★【修复】★ 发送JSON格式的PING消息，匹配Python期望的格式
-                std::string ping_json = R"({"type":"PING","timestamp":)" + 
-                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count()) +
-                    R"(,"sequence":)" + std::to_string(pings_sent_) + "}";
+                // ★【关键修复】★ 使用最可靠的深拷贝方式
+                zmq::message_t ping_msg(ping_json.begin(), ping_json.end());
                 
-                // ★【关键修复】★ 使用深拷贝避免悬空指针
-                zmq::message_t ping_msg(ping_json.size());
-                memcpy(ping_msg.data(), ping_json.c_str(), ping_json.size());
-                
-                // ★【关键修复】★ 使用阻塞发送（send_flags::none），确保消息被完整发送
+                // ★【关键修复】★ 使用阻塞发送，只有成功才更新时间戳和计数器
                 if (heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::none)) {
+                    // ★【关键】★ 只有发送成功后才更新时间戳和计数器
+                    last_ping_time = std::chrono::steady_clock::now();
                     pings_sent_++;
                     // std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // 调试时开启
                 }
-                last_ping_time = now;
             } catch (const zmq::error_t& e) {
-                // ★【关键修复】★ 捕获EHOSTUNREACH等网络错误，避免程序崩溃
+                // ★【关键修复】★ 捕获所有网络错误，不更新时间戳
                 if (e.num() == EHOSTUNREACH) {
                     std::cerr << "[Heartbeat] Network unreachable (EHOSTUNREACH), retrying..." << std::endl;
-                } else if (e.num() != ETERM) {
+                } else if (e.num() != ETERM && e.num() != EAGAIN) {
                     std::cerr << "[Heartbeat] Failed to send PING: " << e.what() << " (errno: " << e.num() << ")" << std::endl;
                 }
+                // ★【关键】★ 发送失败时不更新last_ping_time，这样下次循环会立即重试
             }
         }
 

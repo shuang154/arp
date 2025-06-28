@@ -101,7 +101,7 @@ logging:
 
 # Web API配置
 web_api:
-  enabled: true                  # 启用Web API
+  enabled: false                 # ★【禁用】★ 关闭Web API避免端口冲突
   port: 8080                    # 监听端口
   host: "0.0.0.0"              # 监听所有接口
 

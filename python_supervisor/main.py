@@ -686,10 +686,15 @@ class PythonSupervisor:
                 # ★【关键修复】★ 使用recv()获取原始字节，然后手动解码
                 raw_message = self.heartbeat_receiver.recv(flags=zmq.NOBLOCK)
                 
-                # ★【鲁棒性】★ 检查空消息
-                if not raw_message or len(raw_message) == 0:
-                    time.sleep(0.001)  # 1ms极短休眠
+                # ★【调试】★ 记录收到的原始消息用于诊断
+                if len(raw_message) == 0:
+                    print(f"🚨 EMPTY FRAME DETECTED! Raw message length: {len(raw_message)}")
+                    time.sleep(0.001)
                     continue
+                
+                # ★【调试】★ 每10个消息打印一次原始内容
+                if ping_received % 10 == 0:
+                    print(f"🔍 DEBUG: Raw frame #{ping_received}: {repr(raw_message[:100])}")
 
                 try:
                     # ★【关键修复】★ 手动解码并解析JSON，完全控制异常
@@ -698,11 +703,13 @@ class PythonSupervisor:
                     
                     # 重置JSON错误计数
                     consecutive_json_errors = 0
+                    ping_received += 1
                     
                 except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
                     consecutive_json_errors += 1
                     if consecutive_json_errors <= 5:  # 只记录前5次
                         print(f"⚠️  HEARTBEAT JSON ERROR #{consecutive_json_errors}: {e}")
+                        print(f"     Raw message: {repr(raw_message[:100])}")
                     
                     # ★【关键】★ JSON错误不影响心跳，直接继续
                     time.sleep(0.001)
