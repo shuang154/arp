@@ -113,7 +113,7 @@ public:
         }
 
         std::cout << "[C++ Core] Core modules initialized successfully." << std::endl;
-        std::cout << utils::get_system_info() << std::endl; // ★【修复】★ 调用正确的函数名
+        std::cout << get_system_info() << std::endl; // ★【修复】★ 直接调用函数，不使用命名空间
         return true;
     }
 
