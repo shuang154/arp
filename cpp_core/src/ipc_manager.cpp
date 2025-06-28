@@ -85,13 +85,19 @@ void IPCManager::heartbeat_thread_func() {
     while (!shutdown_flag_) {
         auto now = std::chrono::steady_clock::now();
 
-        // 1. 发送 PING
+        // 1. 发送 PING (JSON格式)
         if (now - last_ping_time > ping_interval) {
             try {
-                zmq::message_t ping_msg("PING", 4);
+                // ★【修复】★ 发送JSON格式的PING消息，匹配Python期望的格式
+                std::string ping_json = R"({"type":"PING","timestamp":)" + 
+                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()) +
+                    R"(,"sequence":)" + std::to_string(pings_sent_) + "}";
+                
+                zmq::message_t ping_msg(ping_json.data(), ping_json.size());
                 if (heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::dontwait)) {
                     pings_sent_++;
-                    // std::cout << "[Heartbeat] Sent PING" << std::endl; // 调试时开启
+                    // std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // 调试时开启
                 }
                 last_ping_time = now;
             } catch (const zmq::error_t& e) {
@@ -99,13 +105,25 @@ void IPCManager::heartbeat_thread_func() {
             }
         }
 
-        // 2. 接收 PONG (非阻塞)
+        // 2. 接收 PONG (非阻塞) - JSON格式
         try {
             zmq::message_t pong_msg;
             if (heartbeat_pong_receiver_->recv(pong_msg, zmq::recv_flags::dontwait)) {
                 std::string pong_str(static_cast<char*>(pong_msg.data()), pong_msg.size());
-                if (pong_str == "PONG") {
-                    handle_pong();
+                
+                // ★【修复】★ 解析JSON格式的PONG消息
+                try {
+                    Document doc;
+                    doc.Parse(pong_str.c_str());
+                    
+                    if (!doc.HasParseError() && doc.IsObject() && 
+                        doc.HasMember("type") && doc["type"].IsString() &&
+                        std::string(doc["type"].GetString()) == "PONG") {
+                        handle_pong();
+                        // std::cout << "[Heartbeat] Received PONG: " << pong_str << std::endl; // 调试时开启
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[Heartbeat] Failed to parse PONG JSON: " << e.what() << std::endl;
                 }
             }
         } catch (const zmq::error_t& e) {

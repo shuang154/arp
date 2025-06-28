@@ -173,15 +173,15 @@ class Config:
         """设置命令IPC地址"""
         self.ipc.command_address = value
     
-    # ★【新增】★ 心跳地址便捷属性
+    # ★【修复】★ 心跳地址便捷属性 - 使用实际存在的属性
     @property
     def heartbeat_ipc_address(self) -> str:
-        return self.ipc.heartbeat_address
+        return self.ipc.heartbeat_ping_address  # ★【修复】★ 使用实际属性名
     
     @heartbeat_ipc_address.setter
     def heartbeat_ipc_address(self, value: str):
         """设置心跳IPC地址"""
-        self.ipc.heartbeat_address = value
+        self.ipc.heartbeat_ping_address = value  # ★【修复】★ 使用实际属性名
     
     # ★【新增】★ Scout和Attack分离的便捷属性
     @property
@@ -301,11 +301,15 @@ class Config:
                 ipc_config = yaml_data['ipc']
                 config.ipc.packet_address = ipc_config.get('packet_address', config.ipc.packet_address)
                 config.ipc.command_address = ipc_config.get('command_address', config.ipc.command_address)
-                # ★【修改】★ 解析PING和PONG地址
-                config.ipc.heartbeat_address = ipc_config.get('heartbeat_address', config.ipc.heartbeat_address)
+                # ★【修复】★ 解析PING和PONG地址 - 使用正确的属性名
+                config.ipc.heartbeat_ping_address = ipc_config.get('heartbeat_ping_address', config.ipc.heartbeat_ping_address)
                 config.ipc.heartbeat_pong_address = ipc_config.get('heartbeat_pong_address', config.ipc.heartbeat_pong_address)
                 config.ipc.heartbeat_interval = ipc_config.get('heartbeat_interval', config.ipc.heartbeat_interval)
                 config.ipc.heartbeat_timeout = ipc_config.get('heartbeat_timeout', config.ipc.heartbeat_timeout)
+                # ★【新增】★ 加载HWM配置
+                config.ipc.packet_hwm = ipc_config.get('packet_hwm', config.ipc.packet_hwm)
+                config.ipc.command_hwm = ipc_config.get('command_hwm', config.ipc.command_hwm)
+                config.ipc.heartbeat_hwm = ipc_config.get('heartbeat_hwm', config.ipc.heartbeat_hwm)
             
             if 'performance' in yaml_data:
                 perf_config = yaml_data['performance']
