@@ -78,9 +78,10 @@ struct IPCCommand {
 class IPCManager {
 private:
     std::unique_ptr<zmq::context_t> context_;
+    std::unique_ptr<zmq::context_t> heartbeat_context_; // ★【新增】★ 独立心跳context
     std::unique_ptr<zmq::socket_t> packet_sender_;    // 发送数据包给Python
-    std::unique_ptr<zmq::socket_t> command_sender_;   // ★【新增】★ 发送命令给Python（心跳等）
-    std::unique_ptr<zmq::socket_t> command_receiver_; // 接收Python的命令
+    std::unique_ptr<zmq::socket_t> command_sender_;   // ★【修复】★ 心跳PING发送通道
+    std::unique_ptr<zmq::socket_t> command_receiver_; // ★【修复】★ 心跳PONG接收通道
     
     bool initialized_;
     uint64_t packets_sent_;

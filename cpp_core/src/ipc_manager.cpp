@@ -30,15 +30,21 @@ bool IPCManager::initialize() {
         packet_sender_->connect("ipc:///tmp/arp_spoofer_packets.ipc");
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000); // 使用新API
         
-        // ★【修复】★ 创建心跳发送socket (PUSH模式) - 专门用于发送PING心跳
-        command_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::push);
-        command_sender_->connect("ipc:///tmp/arp_spoofer_heartbeat.ipc");
-        command_sender_->set(zmq::sockopt::sndtimeo, 1000);
+        // ★【心跳通道修复】★ 创建独立的心跳context，避免主通道阻塞
+        heartbeat_context_ = std::make_unique<zmq::context_t>(1);
         
-        // ★【修复】★ 创建命令接收socket (PULL模式) - 专门用于接收Python的PONG回复
-        command_receiver_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pull);
-        command_receiver_->connect("ipc:///tmp/arp_spoofer_commands.ipc");
-        command_receiver_->set(zmq::sockopt::rcvtimeo, 1); // 使用新API
+        // ★【关键修复】★ 心跳发送socket (PUSH模式) - C++端connect，Python端bind
+        command_sender_ = std::make_unique<zmq::socket_t>(*heartbeat_context_, zmq::socket_type::push);
+        command_sender_->connect("ipc:///tmp/arp_spoofer_heartbeat.ipc");
+        command_sender_->set(zmq::sockopt::sndtimeo, 500);
+        command_sender_->set(zmq::sockopt::sndhwm, 10);  // 低高水位，避免堆积
+        command_sender_->set(zmq::sockopt::linger, 0);   // 快速关闭
+        
+        // ★【关键修复】★ 命令接收socket (PULL模式) - C++端bind，Python端connect
+        command_receiver_ = std::make_unique<zmq::socket_t>(*heartbeat_context_, zmq::socket_type::pull);
+        command_receiver_->bind("ipc:///tmp/arp_spoofer_commands.ipc");
+        command_receiver_->set(zmq::sockopt::rcvtimeo, 1);
+        command_receiver_->set(zmq::sockopt::rcvhwm, 10); // 低高水位，避免PONG堆积
         
         initialized_ = true;
         std::cout << "[IPC Manager] Initialized successfully" << std::endl;
@@ -56,6 +62,7 @@ void IPCManager::shutdown() {
     packet_sender_.reset();
     command_sender_.reset();  // ★【新增】★ 清理命令发送socket
     command_receiver_.reset();
+    heartbeat_context_.reset(); // ★【新增】★ 清理独立心跳context
     context_.reset();
     
     initialized_ = false;

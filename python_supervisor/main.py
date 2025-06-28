@@ -167,32 +167,31 @@ class PythonSupervisor:
             self.packet_receiver.setsockopt(zmq.RCVHWM, 1000)  # ★【新增】★ 高水位标记
             
             # 发送命令的套接字（PUSH模式）
+            # ★【关键修复】★ 命令发送socket - Python端bind，C++端connect接收PONG
             self.command_sender = self.context.socket(zmq.PUSH)
             self.command_sender.bind(self.config.command_ipc_address)
             self.command_sender.setsockopt(zmq.SNDTIMEO, 500)  # ★【优化】★ 减少超时时间
-            self.command_sender.setsockopt(zmq.SNDHWM, 1000)  # ★【新增】★ 高水位标记
+            self.command_sender.setsockopt(zmq.SNDHWM, 10)     # ★【关键】★ 低高水位标记，防止PONG堆积
             
-            # ★【新增】★ 接收心跳的套接字（PULL模式）
-            self.heartbeat_receiver = self.context.socket(zmq.PULL)
+            # ★【关键修复】★ 心跳接收socket - Python端bind，C++端connect发送PING
+            self.heartbeat_receiver = self.heartbeat_context.socket(zmq.PULL)
             self.heartbeat_receiver.bind(self.config.ipc.heartbeat_address)
-            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 100)  # 100ms超时，更频繁检查
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 50)   # ★【优化】★ 更短超时，高响应
+            self.heartbeat_receiver.setsockopt(zmq.RCVHWM, 10)     # ★【关键】★ 低高水位，防止PING堆积
             
-            # ★【关键修复】★ 心跳线程专用的PONG发送socket，避免主线程阻塞影响心跳
-            self.heartbeat_sender = self.context.socket(zmq.PUSH)
+            # ★【关键修复】★ 心跳回复专用socket - Python端connect，C++端bind接收PONG
+            self.heartbeat_sender = self.heartbeat_context.socket(zmq.PUSH)
             self.heartbeat_sender.connect(self.config.command_ipc_address)
-            self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 500)  # 500ms超时，快速失败
-            
-            # ★【新增】★ 独立心跳上下文的专用发送通道
-            self.heartbeat_sender_dedicated = self.heartbeat_context.socket(zmq.PUSH)
-            self.heartbeat_sender_dedicated.connect(self.config.command_ipc_address)
-            self.heartbeat_sender_dedicated.setsockopt(zmq.SNDTIMEO, 200)  # ★【优化】★ 更短超时
+            self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 200)    # ★【优化】★ 快速超时
+            self.heartbeat_sender.setsockopt(zmq.SNDHWM, 5)        # ★【关键】★ 极低高水位
+            self.heartbeat_sender.setsockopt(zmq.LINGER, 0)        # ★【关键】★ 快速关闭
             
             self.logger.info(f"ZMQ sockets initialized:")
             self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
-            self.logger.info(f"  - Command sender: {self.config.command_ipc_address}")
-            self.logger.info(f"  - Heartbeat receiver: {self.config.ipc.heartbeat_address}")
-            self.logger.info(f"  - Heartbeat sender: {self.config.command_ipc_address} (dedicated)")
-            self.logger.info(f"🫀 Heartbeat receiver bound and ready to receive PING messages")
+            self.logger.info(f"  - Command sender: {self.config.command_ipc_address} (bind for PONG)")
+            self.logger.info(f"  - Heartbeat receiver: {self.config.ipc.heartbeat_address} (bind for PING)")
+            self.logger.info(f"  - Heartbeat sender: {self.config.command_ipc_address} (connect for PONG)")
+            self.logger.info(f"🫀 Heartbeat通道配对完成：C++端PING→Python端，Python端PONG→C++端")
             
             return True
             
@@ -776,8 +775,8 @@ class PythonSupervisor:
                 "supervisor_status": "running"
             }
             
-            # ★【关键】★ 使用dedicated心跳sender，不经过队列
-            self.heartbeat_sender_dedicated.send_string(json.dumps(pong_response), zmq.NOBLOCK)
+            # ★【关键】★ 使用独立心跳sender，避免队列阻塞
+            self.heartbeat_sender.send_string(json.dumps(pong_response), zmq.NOBLOCK)
             
             # ★【紧急修复】★ 原子化统计更新，如果锁竞争就跳过
             try:

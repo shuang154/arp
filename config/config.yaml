@@ -47,17 +47,17 @@ attack:
   
   # ★【新增】★ 并发控制配置
   concurrency_control:
-    # Scout并发控制
+    # Scout并发控制 - 削峰填谷策略
     scout_max_x86: 50             # x86平台Scout最大并发数
-    scout_max_arm: 30             # ARM平台Scout最大并发数
-    scout_launch_rate_x86: 12     # x86平台Scout每秒启动数 (提升到12/s)
-    scout_launch_rate_arm: 6      # ARM平台Scout每秒启动数 (提升到6/s)
+    scout_max_arm: 25             # ARM平台Scout最大并发数 (从30降到25)
+    scout_launch_rate_x86: 8      # x86平台Scout每秒启动数 (从12降到8)
+    scout_launch_rate_arm: 2      # ARM平台Scout每秒启动数 (从6降到2) ★【削峰】★
     
-    # Attack并发控制
+    # Attack并发控制 - 削峰填谷策略
     attack_max_x86: 25            # x86平台Attack最大并发数
-    attack_max_arm: 15            # ARM平台Attack最大并发数
-    attack_refill_rate_x86: 6     # x86平台Attack令牌桶补充速率/秒 (提升到6/s)
-    attack_refill_rate_arm: 3     # ARM平台Attack令牌桶补充速率/秒 (提升到3/s)
+    attack_max_arm: 12            # ARM平台Attack最大并发数 (从15降到12)
+    attack_refill_rate_x86: 4     # x86平台Attack令牌桶补充速率/秒 (从6降到4)
+    attack_refill_rate_arm: 1     # ARM平台Attack令牌桶补充速率/秒 (从3降到1) ★【削峰】★
     
     # 去重控制
     event_dedup_ttl_x86: 5        # x86平台事件去重TTL(秒)
@@ -65,9 +65,9 @@ attack:
     command_dedup_ttl_x86: 3      # x86平台命令去重TTL(秒)
     command_dedup_ttl_arm: 3      # ARM平台命令去重TTL(秒)
     
-    # 随机延迟控制
-    random_delay_min_ms: 10       # 最小随机延迟(毫秒)
-    random_delay_max_ms: 100      # 最大随机延迟(毫秒)
+    # 随机延迟控制 - 填谷策略
+    random_delay_min_ms: 50       # 最小随机延迟(毫秒) (从10增到50) ★【填谷】★
+    random_delay_max_ms: 200      # 最大随机延迟(毫秒) (从100增到200) ★【填谷】★
   
   # ★【增强】★ 分级递进式攻击策略
   strategy:
