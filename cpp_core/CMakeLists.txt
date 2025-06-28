@@ -27,6 +27,12 @@ if(NOT RAPIDJSON_INCLUDE_DIR)
     message(FATAL_ERROR "RapidJSON not found. Please install rapidjson-dev")
 endif()
 
+# ★【新增】★ 查找YAML-cpp
+find_library(YAML_CPP_LIBRARY yaml-cpp)
+if(NOT YAML_CPP_LIBRARY)
+    message(FATAL_ERROR "YAML-cpp not found. Please install libyaml-cpp-dev")
+endif()
+
 # 包含目录
 include_directories(${LIBPCAP_INCLUDE_DIRS})
 include_directories(${ZMQ_INCLUDE_DIR})
@@ -61,6 +67,7 @@ add_executable(arp_core ${SOURCES} ${HEADERS})
 target_link_libraries(arp_core
     ${LIBPCAP_LIBRARIES}
     ${ZMQ_LIBRARY}
+    ${YAML_CPP_LIBRARY}  # ★【新增】★ 添加YAML-cpp库
     pthread
 )
 
