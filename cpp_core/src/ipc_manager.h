@@ -45,6 +45,22 @@ struct PacketInfo {
     
     char payload[MAX_PAYLOAD_SIZE] = {0};
     uint32_t payload_length = 0;
+    
+    // ★【新增】★ 重置函数，供对象池使用
+    void reset() {
+        timestamp = {0, 0};
+        type = PacketType::UNKNOWN;
+        src_ip.clear();
+        dst_ip.clear();
+        src_port = 0;
+        dst_port = 0;
+        arp_opcode = 0;
+        memset(src_mac, 0, 6);
+        memset(dst_mac, 0, 6);
+        length = 0;
+        memset(payload, 0, MAX_PAYLOAD_SIZE);
+        payload_length = 0;
+    }
 };
 
 // IPC命令结构

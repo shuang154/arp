@@ -5,8 +5,11 @@
 #include <string>
 #include <atomic>
 #include <memory>
+#include "object_pool.h"
+#include "ipc_manager.h"
 
-class IPCManager;
+// 前向声明PacketInfoPool
+class PacketInfoPool;
 
 class PacketSniffer {
 private:
@@ -14,6 +17,9 @@ private:
     pcap_t* handle_;
     IPCManager* ipc_manager_;
     std::atomic<bool> running_;
+    
+    // ★【新增】★ 对象池用于高效分配PacketInfo
+    std::unique_ptr<PacketInfoPool> packet_info_pool_;
     
     // 统计信息
     std::atomic<uint64_t> packets_captured_;
@@ -34,6 +40,9 @@ public:
     // 获取统计信息
     uint64_t get_packets_captured() const { return packets_captured_; }
     uint64_t get_packets_dropped() const { return packets_dropped_; }
+    
+    // ★【新增】★ 获取对象池统计信息
+    void print_pool_stats() const;
 
 private:
     void process_packet(const struct pcap_pkthdr* header, const u_char* packet);

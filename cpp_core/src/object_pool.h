@@ -149,20 +149,11 @@ public:
         ) {}
 
 private:
-    void reset_object(PacketInfo* pkt) {
-        // 重置PacketInfo对象的状态
-        pkt->type = PacketType::UNKNOWN;
-        pkt->src_ip.clear();
-        pkt->dst_ip.clear();
-        pkt->src_port = 0;
-        pkt->dst_port = 0;
-        pkt->arp_opcode = 0;
-        memset(pkt->src_mac, 0, 6);
-        memset(pkt->dst_mac, 0, 6);
-        pkt->length = 0;
-        memset(pkt->payload, 0, MAX_PAYLOAD_SIZE);
-        pkt->payload_length = 0;
-        pkt->timestamp = {0, 0};
+    void reset_object(PacketInfo* pkt) override {
+        // 调用PacketInfo的reset方法
+        if (pkt) {
+            pkt->reset();
+        }
     }
 };
 

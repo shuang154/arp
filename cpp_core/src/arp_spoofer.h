@@ -38,6 +38,10 @@ private:
     std::unordered_map<std::string, std::shared_ptr<SpoofSession>> active_sessions_;
     mutable std::mutex sessions_mutex_;  // 添加mutable关键字
     
+    // ★【新增】★ ARP恢复去重机制
+    std::unordered_set<std::string> recently_restored_targets_;
+    mutable std::mutex restore_mutex_;
+    
     // 统计信息
     std::atomic<uint64_t> total_packets_sent_;
     std::atomic<uint64_t> total_sessions_;

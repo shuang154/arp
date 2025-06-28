@@ -8,6 +8,7 @@ import json
 import re
 import urllib.parse
 import logging
+import ipaddress  # ★【新增】★ 用于IP地址验证
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,13 @@ class PacketAnalyzer:
     def __init__(self, config):
         self.config = config
         self.logger = logging.getLogger(__name__)
+        
+        # ★【新增】★ 无效IP地址过滤集合
+        self.invalid_ips = {
+            '0.0.0.0',      # 无效地址
+            '255.255.255.255',  # 广播地址
+            '127.0.0.1',    # 回环地址
+        }
         
         # ★【增强】★ 凭据提取的正则表达式模式 - 支持更多常见格式
         self.credential_patterns = {
@@ -94,6 +102,11 @@ class PacketAnalyzer:
             src_ip = packet_info.get('src_ip', '')
             dst_ip = packet_info.get('dst_ip', '')
             arp_opcode = packet_info.get('arp_opcode', 0)
+            
+            # ★【新增】★ 过滤无效IP地址
+            if not self._is_valid_target_ip(src_ip):
+                self.logger.debug(f"Filtered invalid source IP: {src_ip}")
+                return None
             
             # 检查是否是ARP请求 (who-has)
             if arp_opcode != 1:
@@ -243,6 +256,30 @@ class PacketAnalyzer:
             return method
         except:
             return 'UNKNOWN'
+    
+    def _is_valid_target_ip(self, ip_str: str) -> bool:
+        """验证IP地址是否为有效的攻击目标"""
+        try:
+            # 检查是否为空或明显无效的IP
+            if not ip_str or ip_str in self.invalid_ips:
+                return False
+            
+            # 解析IP地址
+            ip = ipaddress.IPv4Address(ip_str)
+            
+            # 过滤特殊范围的IP
+            if ip.is_multicast or ip.is_reserved or ip.is_loopback:
+                return False
+            
+            # 过滤私有地址中的特殊情况（可选，根据实际需求调整）
+            if ip_str.startswith('169.254.'):  # 链路本地地址
+                return False
+            
+            return True
+            
+        except (ipaddress.AddressValueError, ValueError):
+            # IP地址格式错误
+            return False
     
     def get_statistics(self) -> Dict[str, int]:
         """获取分析统计信息"""

@@ -71,6 +71,13 @@ void ARPSpoofer::shutdown() {
     // ★【修复】★ 清理会话
     active_sessions_.clear();
     
+    // ★【新增】★ 清理恢复标记
+    {
+        std::lock_guard<std::mutex> restore_lock(restore_mutex_);
+        recently_restored_targets_.clear();
+        std::cout << "[ARP Spoofer] Cleared restore tracking set" << std::endl;
+    }
+    
     if (raw_socket_ >= 0) {
         close(raw_socket_);
         raw_socket_ = -1;
@@ -210,6 +217,18 @@ bool ARPSpoofer::stop_spoofing(const std::string& target_ip) {
 
 bool ARPSpoofer::restore_arp(const std::string& target_ip, const std::string& gateway_ip,
                             const std::string& target_mac, const std::string& gateway_mac) {
+    // ★【新增去重检查】★ 避免对同一目标重复恢复
+    {
+        std::lock_guard<std::mutex> lock(restore_mutex_);
+        if (recently_restored_targets_.find(target_ip) != recently_restored_targets_.end()) {
+            std::cout << "[ARP Spoofer] ⚠️ ARP restore for " << target_ip << " already in progress, skipping duplicate" << std::endl;
+            return true;  // 认为成功，避免重复日志
+        }
+        
+        // 标记为正在恢复
+        recently_restored_targets_.insert(target_ip);
+    }
+    
     std::cout << "[ARP Spoofer] Restoring ARP for " << target_ip << std::endl;
     
     // 发送正确的ARP回复包恢复目标的ARP表
@@ -230,6 +249,14 @@ bool ARPSpoofer::restore_arp(const std::string& target_ip, const std::string& ga
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    
+    // ★【延迟清理】★ 1秒后移除恢复标记（给其他线程足够时间检测到去重）
+    std::thread cleanup_thread([this, target_ip]() {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::lock_guard<std::mutex> lock(restore_mutex_);
+        recently_restored_targets_.erase(target_ip);
+    });
+    cleanup_thread.detach();
     
     return success;
 }
@@ -391,25 +418,38 @@ void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t durati
     // 定时器到期，自动停止攻击并恢复网络
     std::cout << "[ARP Spoofer] Timer expired for " << target_ip << " - auto-stopping attack" << std::endl;
     
-    // 获取恢复网络所需的信息
+    // ★【修复死锁】★ 获取恢复网络所需的信息，但不直接调用stop_spoofing（避免死锁）
     std::string gateway_ip, target_mac, gateway_mac;
+    bool should_restore = false;
+    
     if (auto session_shared_ptr = session_weak_ptr.lock()) {
         gateway_ip = session_shared_ptr->gateway_ip;
         target_mac = session_shared_ptr->target_mac;
         gateway_mac = session_shared_ptr->gateway_mac;
+        should_restore = true;
+        
+        // ★【修复】★ 直接标记会话为不活跃，让欺骗线程自然退出
+        session_shared_ptr->active = false;
+        session_shared_ptr->timer_active = false;
+        
+        std::cout << "[ARP Spoofer] Session " << target_ip << " marked for termination by timer" << std::endl;
     } else {
         std::cout << "[ARP Spoofer] Session destroyed before timer completion for " << target_ip << std::endl;
         return;
     }
     
-    // 停止攻击
-    stop_spoofing(target_ip);
+    // ★【新增】★ 延迟一点时间让欺骗线程有时间检测到状态变化并退出
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    // 恢复网络
-    if (!gateway_ip.empty()) {
+    // 恢复网络（不需要锁，因为只使用本地变量）
+    if (should_restore && !gateway_ip.empty()) {
         restore_arp(target_ip, gateway_ip, target_mac, gateway_mac);
         std::cout << "[ARP Spoofer] ⏰ Auto-restored network for " << target_ip << " after timeout" << std::endl;
     }
+    
+    // ★【新增】★ 通知主程序清理该会话（通过一个安全的方式）
+    // 这里可以使用事件队列或其他机制，但现在先简化处理
+    std::cout << "[ARP Spoofer] Timer thread completed for " << target_ip << std::endl;
 }
 
 std::string ARPSpoofer::get_interface_mac() {

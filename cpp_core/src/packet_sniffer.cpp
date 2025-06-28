@@ -10,6 +10,10 @@
 PacketSniffer::PacketSniffer(const std::string& interface, IPCManager* ipc)
     : interface_(interface), handle_(nullptr), ipc_manager_(ipc), 
       running_(false), packets_captured_(0), packets_dropped_(0) {
+    
+    // ★【新增】★ 初始化PacketInfo对象池（预分配1000个对象，最大5000个）
+    packet_info_pool_ = std::make_unique<PacketInfoPool>(1000, 5000);
+    std::cout << "[Sniffer] Initialized PacketInfo object pool (1000 initial, 5000 max)" << std::endl;
 }
 
 PacketSniffer::~PacketSniffer() {
@@ -124,14 +128,25 @@ void PacketSniffer::packet_handler(u_char* user, const struct pcap_pkthdr* heade
 void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_char* packet) {
     packets_captured_++;
     
+    // ★【优化】★ 使用对象池分配PacketInfo，避免频繁内存分配
+    auto pkt_info = packet_info_pool_->acquire();
+    if (!pkt_info) {
+        std::cerr << "[Sniffer] Failed to acquire PacketInfo from pool" << std::endl;
+        return;
+    }
+    
+    // 重置对象状态（对象池会自动调用reset，但为了保险再次调用）
+    pkt_info->reset();
+    
     // 基本数据包信息
-    PacketInfo pkt_info;
-    pkt_info.timestamp = header->ts;
-    pkt_info.length = header->caplen;
-    pkt_info.type = PacketType::UNKNOWN;
+    pkt_info->timestamp = header->ts;
+    pkt_info->length = header->caplen;
+    pkt_info->type = PacketType::UNKNOWN;
     
     // 解析以太网头
     if (header->caplen < sizeof(struct ethhdr)) {
+        // 将对象归还到池中
+        packet_info_pool_->release(std::move(pkt_info));
         return;
     }
     
@@ -140,23 +155,24 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
     // 检查是否为ARP包
     if (ntohs(eth_header->h_proto) == ETH_P_ARP) {
         if (header->caplen >= sizeof(struct ethhdr) + sizeof(struct ether_arp)) {
-            pkt_info.type = PacketType::ARP;
+            pkt_info->type = PacketType::ARP;
             
             struct ether_arp* arp_header = (struct ether_arp*)(packet + sizeof(struct ethhdr));
             
             // 提取ARP信息
-            pkt_info.src_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_spa);
-            pkt_info.dst_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_tpa);
-            pkt_info.arp_opcode = ntohs(arp_header->arp_op);
+            pkt_info->src_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_spa);
+            pkt_info->dst_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_tpa);
+            pkt_info->arp_opcode = ntohs(arp_header->arp_op);
             
             // 复制MAC地址
-            memcpy(pkt_info.src_mac, arp_header->arp_sha, 6);
-            memcpy(pkt_info.dst_mac, arp_header->arp_tha, 6);
+            memcpy(pkt_info->src_mac, arp_header->arp_sha, 6);
+            memcpy(pkt_info->dst_mac, arp_header->arp_tha, 6);
         }
     }
     // 检查是否为IP包
     else if (ntohs(eth_header->h_proto) == ETH_P_IP) {
         if (header->caplen < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
+            packet_info_pool_->release(std::move(pkt_info));
             return;
         }
         
@@ -166,6 +182,7 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
         if (ip_header->protocol == IPPROTO_TCP) {
             int ip_header_len = ip_header->ihl * 4;
             if (header->caplen < sizeof(struct ethhdr) + ip_header_len + sizeof(struct tcphdr)) {
+                packet_info_pool_->release(std::move(pkt_info));
                 return;
             }
             
@@ -174,16 +191,16 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
             // 检查是否为HTTP端口
             uint16_t dst_port = ntohs(tcp_header->dest);
             if (dst_port == 80 || dst_port == 443 || dst_port == 8080 || dst_port == 801) {
-                pkt_info.type = PacketType::HTTP;
+                pkt_info->type = PacketType::HTTP;
                 
                 struct in_addr src_addr, dst_addr;
                 src_addr.s_addr = ip_header->saddr;
                 dst_addr.s_addr = ip_header->daddr;
                 
-                pkt_info.src_ip = inet_ntoa(src_addr);
-                pkt_info.dst_ip = inet_ntoa(dst_addr);
-                pkt_info.src_port = ntohs(tcp_header->source);
-                pkt_info.dst_port = dst_port;
+                pkt_info->src_ip = inet_ntoa(src_addr);
+                pkt_info->dst_ip = inet_ntoa(dst_addr);
+                pkt_info->src_port = ntohs(tcp_header->source);
+                pkt_info->dst_port = dst_port;
                 
                 // 如果有HTTP数据，复制payload
                 int tcp_header_len = tcp_header->doff * 4;
@@ -192,9 +209,9 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
                 if (header->caplen > total_header_len) {
                     int payload_len = header->caplen - total_header_len;
                     if (payload_len > 0 && payload_len < MAX_PAYLOAD_SIZE) {
-                        memcpy(pkt_info.payload, packet + total_header_len, payload_len);
-                        pkt_info.payload_length = payload_len;
-                        pkt_info.payload[payload_len] = '\0';
+                        memcpy(pkt_info->payload, packet + total_header_len, payload_len);
+                        pkt_info->payload_length = payload_len;
+                        pkt_info->payload[payload_len] = '\0';
                     }
                 }
             }
@@ -202,11 +219,15 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
     }
     
     // 如果是我们感兴趣的包类型，发送给Python层
-    if (pkt_info.type != PacketType::UNKNOWN) {
+    if (pkt_info->type != PacketType::UNKNOWN) {
         if (ipc_manager_) {
-            ipc_manager_->send_packet(pkt_info);
+            // 发送数据包（IPCManager会复制数据，所以可以安全归还对象）
+            ipc_manager_->send_packet(*pkt_info);
         }
     }
+    
+    // ★【关键】★ 将对象归还到池中以供重复使用
+    packet_info_pool_->release(std::move(pkt_info));
 }
 
 bool PacketSniffer::is_arp_packet(const u_char* packet, int len) {
@@ -231,4 +252,18 @@ bool PacketSniffer::is_http_packet(const u_char* packet, int len) {
     
     uint16_t dst_port = ntohs(tcp_header->dest);
     return (dst_port == 80 || dst_port == 443 || dst_port == 8080 || dst_port == 801);
+}
+
+// ★【新增】★ 打印对象池统计信息
+void PacketSniffer::print_pool_stats() const {
+    if (packet_info_pool_) {
+        auto stats = packet_info_pool_->get_stats();
+        std::cout << "[Sniffer] PacketInfo Pool Stats:" << std::endl
+                  << "  Current Size: " << stats.current_size << std::endl
+                  << "  Objects Created: " << stats.objects_created << std::endl
+                  << "  Objects Reused: " << stats.objects_reused << std::endl
+                  << "  Pool Hits: " << stats.pool_hits << std::endl
+                  << "  Pool Misses: " << stats.pool_misses << std::endl
+                  << "  Hit Ratio: " << (stats.hit_ratio * 100) << "%" << std::endl;
+    }
 }
