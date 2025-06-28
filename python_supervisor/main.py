@@ -467,14 +467,15 @@ class PythonSupervisor:
     def _execute_decision(self, decision):
         """执行攻击决策 - 使用队列而不是直接发送"""
         try:
+            # ★【关键修复】★ AttackDecision是dataclass对象，使用属性访问而不是字典下标
             command = {
-                "type": decision["action"],
-                "target_ip": decision["target_ip"],
-                "gateway_ip": decision.get("gateway_ip", "10.17.0.1"),
-                "target_mac": decision.get("target_mac", ""),
-                "gateway_mac": decision.get("gateway_mac", ""),
-                "duration": decision.get("duration", 60),
-                "attack_type": decision.get("attack_type", "scouting")
+                "type": decision.action,
+                "target_ip": decision.target_ip,
+                "gateway_ip": decision.gateway_ip or "10.17.0.1",
+                "target_mac": decision.target_mac or "",
+                "gateway_mac": decision.gateway_mac or "",
+                "duration": decision.duration or 60,
+                "attack_type": decision.attack_type or "scouting"
             }
             
             # ★【关键修改】★ 使用队列而不是直接发送
@@ -529,7 +530,8 @@ class PythonSupervisor:
         # 发送关闭信号给C++核心
         try:
             shutdown_cmd = {"type": "shutdown"}
-            self._send_command(shutdown_cmd)
+            # ★【关键修复】★ 使用正确的方法名_queue_command而不是不存在的_send_command
+            self._queue_command(shutdown_cmd)
             self.logger.info("📤 Shutdown signal sent to C++ core")
         except Exception as e:
             self.logger.error(f"Failed to send shutdown command: {e}")
