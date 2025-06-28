@@ -32,6 +32,11 @@ class AttackCoordinator:
         self.logger = logging.getLogger(__name__)
         self.command_sender = None
         
+        # ★【关键修复】★ 并发攻击任务限制
+        self.max_concurrent_attacks = getattr(config, 'max_concurrent_attacks', 20)  # 最大并发攻击数
+        self.active_attacks_lock = threading.Lock()
+        self.active_attacks: Set[str] = set()  # 当前活跃的攻击目标
+        
         # ★【强化去重】★ 全局凭据处理去重锁和缓存
         self._global_credentials_lock = threading.RLock()  # 可重入锁
         self._processing_credentials: Set[str] = set()  # 正在处理的凭据集合
@@ -398,3 +403,43 @@ class AttackCoordinator:
         })
         
         return stats
+    
+    def register_active_attack(self, target_ip: str, duration: int) -> bool:
+        """★【新增】★ 注册活跃攻击，返回是否成功"""
+        with self.active_attacks_lock:
+            if len(self.active_attacks) >= self.max_concurrent_attacks:
+                self.logger.warning(f"🚫 Cannot register attack on {target_ip}: max concurrent attacks ({self.max_concurrent_attacks}) reached")
+                return False
+            
+            if target_ip in self.active_attacks:
+                self.logger.debug(f"🚫 Attack on {target_ip} already active")
+                return False
+            
+            self.active_attacks.add(target_ip)
+            self.logger.info(f"✅ Registered active attack on {target_ip} (active: {len(self.active_attacks)}/{self.max_concurrent_attacks})")
+            
+            # ★【关键】★ 设置定时器自动清理
+            def cleanup_attack():
+                with self.active_attacks_lock:
+                    if target_ip in self.active_attacks:
+                        self.active_attacks.remove(target_ip)
+                        self.logger.info(f"🕐 Auto-removed active attack on {target_ip} after {duration}s (active: {len(self.active_attacks)}/{self.max_concurrent_attacks})")
+            
+            # 启动清理定时器
+            cleanup_timer = threading.Timer(duration + 5, cleanup_attack)  # 额外5秒缓冲
+            cleanup_timer.daemon = True
+            cleanup_timer.start()
+            
+            return True
+    
+    def unregister_active_attack(self, target_ip: str):
+        """★【新增】★ 手动注销活跃攻击"""
+        with self.active_attacks_lock:
+            if target_ip in self.active_attacks:
+                self.active_attacks.remove(target_ip)
+                self.logger.info(f"✅ Manually removed active attack on {target_ip} (active: {len(self.active_attacks)}/{self.max_concurrent_attacks})")
+    
+    def get_active_attacks_count(self) -> int:
+        """★【新增】★ 获取当前活跃攻击数量"""
+        with self.active_attacks_lock:
+            return len(self.active_attacks)

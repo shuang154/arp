@@ -30,12 +30,12 @@ bool IPCManager::initialize() {
         packet_sender_->connect("ipc:///tmp/arp_spoofer_packets.ipc");
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000); // 使用新API
         
-        // ★【新增】★ 创建命令发送socket (PUSH模式) - 用于发送心跳等控制命令
+        // ★【修复】★ 创建心跳发送socket (PUSH模式) - 专门用于发送PING心跳
         command_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::push);
         command_sender_->connect("ipc:///tmp/arp_spoofer_heartbeat.ipc");
         command_sender_->set(zmq::sockopt::sndtimeo, 1000);
         
-        // 创建命令接收socket (PULL模式)  
+        // ★【修复】★ 创建命令接收socket (PULL模式) - 专门用于接收Python的PONG回复
         command_receiver_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pull);
         command_receiver_->connect("ipc:///tmp/arp_spoofer_commands.ipc");
         command_receiver_->set(zmq::sockopt::rcvtimeo, 1); // 使用新API
@@ -292,6 +292,7 @@ void IPCManager::heartbeat_loop() {
 
 bool IPCManager::send_ping() {
     if (!initialized_ || !command_sender_) {  // ★【修改】★ 使用命令发送通道
+        std::cerr << "[IPC Manager] ❌ Cannot send ping: not initialized or command_sender_ is null" << std::endl;
         return false;
     }
     
@@ -324,6 +325,9 @@ bool IPCManager::send_ping() {
         if (sent) {
             last_ping_time_ = std::chrono::steady_clock::now();
             pings_sent_++;
+            std::cout << "[IPC Manager] ✅ PING sent successfully (seq: " << pings_sent_.load() << ")" << std::endl;
+        } else {
+            std::cerr << "[IPC Manager] ❌ Failed to send PING message" << std::endl;
         }
         
         return sent;
@@ -341,6 +345,8 @@ void IPCManager::handle_pong() {
     // 计算往返时间
     auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
         last_pong_time_ - last_ping_time_).count();
+    
+    std::cout << "[IPC Manager] ✅ PONG received! RTT: " << rtt << "ms (total pongs: " << pongs_received_.load() << ")" << std::endl;
     
     // 可以在这里记录RTT统计信息
     if (rtt > 100) {  // 如果RTT超过100ms，发出警告

@@ -43,6 +43,7 @@ class PythonSupervisor:
         self.packet_receiver = None
         self.command_sender = None
         self.heartbeat_receiver = None  # ★【新增】★ 心跳接收通道
+        self.heartbeat_sender = None    # ★【新增】★ 心跳线程专用发送通道
         
         # 核心组件
         self.state_cache = StateCache()
@@ -142,10 +143,17 @@ class PythonSupervisor:
             self.heartbeat_receiver.bind(self.config.ipc.heartbeat_address)
             self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 100)  # 100ms超时，更频繁检查
             
+            # ★【关键修复】★ 心跳线程专用的PONG发送socket，避免主线程阻塞影响心跳
+            self.heartbeat_sender = self.context.socket(zmq.PUSH)
+            self.heartbeat_sender.connect(self.config.command_ipc_address)
+            self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 500)  # 500ms超时，快速失败
+            
             self.logger.info(f"ZMQ sockets initialized:")
             self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
             self.logger.info(f"  - Command sender: {self.config.command_ipc_address}")
             self.logger.info(f"  - Heartbeat receiver: {self.config.ipc.heartbeat_address}")
+            self.logger.info(f"  - Heartbeat sender: {self.config.command_ipc_address} (dedicated)")
+            self.logger.info(f"🫀 Heartbeat receiver bound and ready to receive PING messages")
             
             return True
             
@@ -168,73 +176,14 @@ class PythonSupervisor:
                     raw_data = self.packet_receiver.recv(zmq.NOBLOCK)
                     self.stats['packets_received'] += 1
                     
-                    # ★★★【性能优化】★★★ 快速预过滤 - 在主线程中进行
-                    # 2. 解码并进行快速JSON有效性检查
-                    try:
-                        packet_data = raw_data.decode('utf-8')
-                        packet_info = json.loads(packet_data)  # 快速解析检查
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        # 无效数据，直接丢弃
+                    # ★★★【关键性能优化】★★★ 主线程只负责快速接收和分发
+                    # 2. 最轻量的预检查 - 只检查数据长度
+                    if len(raw_data) < 10:  # 过小的数据直接丢弃
                         continue
                     
-                    # 3. ★【性能关键】★ 快速预过滤：检查是否值得处理
-                    if not self._is_packet_worth_processing(packet_info):
-                        continue
-                    
-                    # 4. ★★★【核心优化】★★★ 在提交到线程池前进行去重
-                    # 计算数据包的哈希值作为唯一"指纹"
-                    payload_hash = hashlib.sha1(raw_data).hexdigest()
-                    
-                    # 检查指纹是否存在于近期缓存中
-                    with self.cache_lock:
-                        if hasattr(self, 'recent_packets_cache') and self.recent_packets_cache is not None:
-                            if payload_hash in self.recent_packets_cache:
-                                # 如果存在，说明是重复包，直接丢弃
-                                continue
-                            else:
-                                # 如果是新包，将其指纹存入缓存
-                                self.recent_packets_cache[payload_hash] = True
-                        else:
-                            # 容错：初始化缓存
-                            try:
-                                from cachetools import TTLCache
-                                self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
-                                self.recent_packets_cache[payload_hash] = True
-                                self.logger.warning("🔧 Re-initialized packet deduplication cache")
-                            except ImportError:
-                                # 如果TTLCache不可用，使用简单字典
-                                self.recent_packets_cache = {}
-                                self.recent_packets_cache[payload_hash] = True
-                                self.logger.warning("🔧 Using simple dict for packet deduplication (TTLCache not available)")
-                    
-                    # 5. ★【强化HTTP去重】★ 针对包含凭据的HTTP包进行额外去重
-                    if packet_info.get('type') == 2 and self._has_potential_credentials(packet_info):  # HTTP包
-                        src_ip = packet_info.get('src_ip', '')
-                        payload = packet_info.get('payload', '')
-                        
-                        # 构建HTTP凭据指纹（基于IP和载荷特征）
-                        cred_fingerprint = f"{src_ip}:{hashlib.md5(payload.encode()).hexdigest()[:8]}"
-                        
-                        with self.http_cache_lock:
-                            if hasattr(self, 'http_credentials_cache') and self.http_credentials_cache is not None:
-                                if cred_fingerprint in self.http_credentials_cache:
-                                    continue  # 跳过重复的HTTP凭据包
-                                else:
-                                    self.http_credentials_cache[cred_fingerprint] = True
-                            else:
-                                # 容错：初始化HTTP凭据缓存
-                                try:
-                                    from cachetools import TTLCache
-                                    self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)
-                                    self.http_credentials_cache[cred_fingerprint] = True
-                                    self.logger.warning("🔧 Re-initialized HTTP credentials deduplication cache")
-                                except ImportError:
-                                    self.http_credentials_cache = {}
-                                    self.http_credentials_cache[cred_fingerprint] = True
-                                    self.logger.warning("🔧 Using simple dict for HTTP deduplication")
-                    
-                    # 6. ★ 只有经过所有过滤的高价值数据包才提交给线程池处理
-                    self.thread_pool.submit(self._process_packet, packet_data)
+                    # 3. ★【性能关键】★ 直接提交到线程池，避免主线程阻塞
+                    # 将所有重型操作（JSON解析、哈希计算、去重）都移到工作线程中
+                    self.thread_pool.submit(self._process_packet_with_dedup, raw_data)
                     
                 except zmq.Again:
                     # 没有数据包，短暂休眠
@@ -274,6 +223,12 @@ class PythonSupervisor:
         """执行攻击决策"""
         try:
             if decision.action == 'attack':
+                # ★【关键修复】★ 注册活跃攻击
+                if hasattr(self.attack_coordinator, 'register_active_attack'):
+                    if not self.attack_coordinator.register_active_attack(decision.target_ip, decision.duration):
+                        self.logger.warning(f"🚫 Attack on {decision.target_ip} rejected due to concurrency limits")
+                        return
+                
                 attack_log = f"Launching {decision.attack_type} attack on {decision.target_ip} for {decision.duration}s"
                 self.logger.info(attack_log)
                 self.stats['attacks_launched'] += 1
@@ -340,6 +295,8 @@ class PythonSupervisor:
     
     def _heartbeat_loop(self):
         """心跳监听循环 - 使用专用心跳通道"""
+        self.logger.info("🫀 Heartbeat loop started, waiting for PING from C++ core...")
+        
         while self.heartbeat_running and self.running:
             try:
                 # ★【新增】★ 从专用心跳通道接收PING消息
@@ -349,7 +306,10 @@ class PythonSupervisor:
                     ping_info = json.loads(heartbeat_data)
                     
                     if ping_info.get('type') == 'PING':
+                        self.logger.info(f"🫀 Received PING: {ping_info}")  # ★【提升为INFO级别】★
                         self._handle_ping(ping_info)
+                    else:
+                        self.logger.warning(f"🫀 Unexpected heartbeat message: {ping_info}")
                         
                 except zmq.Again:
                     # 没有心跳数据，继续下一次循环
@@ -369,9 +329,10 @@ class PythonSupervisor:
                 time.sleep(1)
     
     def _handle_ping(self, ping_data):
-        """处理心跳PING并回复PONG"""
+        """处理心跳PING并回复PONG - 使用独立的心跳发送通道"""
         try:
             self.last_ping_time = time.time()
+            self.logger.info(f"🫀 Processing PING, sending PONG response...")  # ★【提升为INFO级别】★
             
             # 构造PONG响应
             pong_command = {
@@ -380,8 +341,15 @@ class PythonSupervisor:
                 'status': 'healthy'
             }
             
-            # 发送PONG
-            self._send_command(pong_command)
+            # ★【关键修复】★ 使用心跳线程专用的socket发送PONG，避免主线程阻塞
+            try:
+                pong_json = json.dumps(pong_command)
+                self.heartbeat_sender.send_string(pong_json, zmq.NOBLOCK)
+                self.logger.info(f"🫀 PONG sent successfully via dedicated heartbeat channel")
+            except zmq.Again:
+                self.logger.warning(f"🫀 PONG send timeout - heartbeat channel busy")
+            except Exception as send_error:
+                self.logger.error(f"🫀 Failed to send PONG via heartbeat channel: {send_error}")
             
         except Exception as e:
             self.logger.error(f"Failed to handle ping: {e}")
@@ -458,6 +426,9 @@ class PythonSupervisor:
             if self.heartbeat_receiver:  # ★【新增】★ 关闭心跳接收器
                 self.heartbeat_receiver.close()
                 self.logger.info("❤️ Heartbeat receiver socket closed")
+            if self.heartbeat_sender:    # ★【新增】★ 关闭心跳发送器
+                self.heartbeat_sender.close()
+                self.logger.info("❤️ Heartbeat sender socket closed")
         except Exception as e:
             self.logger.warning(f"ZMQ socket cleanup error: {e}")
             
@@ -526,7 +497,70 @@ class PythonSupervisor:
         except Exception:
             return True  # 出错时保守处理
     
-    # ...existing code...
+    def _process_packet_with_dedup(self, raw_data: bytes):
+        """★【新增】★ 工作线程中的完整数据包处理（包含去重）"""
+        try:
+            # 1. JSON解析（在工作线程中进行）
+            try:
+                packet_data = raw_data.decode('utf-8')
+                packet_info = json.loads(packet_data)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return  # 无效数据，直接丢弃
+            
+            # 2. 预过滤检查
+            if not self._is_packet_worth_processing(packet_info):
+                return
+            
+            # 3. 去重检查（在工作线程中进行）
+            payload_hash = hashlib.sha1(raw_data).hexdigest()
+            
+            with self.cache_lock:
+                if hasattr(self, 'recent_packets_cache') and self.recent_packets_cache is not None:
+                    if payload_hash in self.recent_packets_cache:
+                        return  # 重复包，丢弃
+                    else:
+                        self.recent_packets_cache[payload_hash] = True
+                else:
+                    # 容错：初始化缓存
+                    try:
+                        from cachetools import TTLCache
+                        self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
+                        self.recent_packets_cache[payload_hash] = True
+                        self.logger.warning("🔧 Re-initialized packet deduplication cache")
+                    except ImportError:
+                        self.recent_packets_cache = {}
+                        self.recent_packets_cache[payload_hash] = True
+                        self.logger.warning("🔧 Using simple dict for packet deduplication")
+            
+            # 4. HTTP凭据去重
+            if packet_info.get('type') == 2 and self._has_potential_credentials(packet_info):
+                src_ip = packet_info.get('src_ip', '')
+                payload = packet_info.get('payload', '')
+                
+                cred_fingerprint = f"{src_ip}:{hashlib.md5(payload.encode()).hexdigest()[:8]}"
+                
+                with self.http_cache_lock:
+                    if hasattr(self, 'http_credentials_cache') and self.http_credentials_cache is not None:
+                        if cred_fingerprint in self.http_credentials_cache:
+                            return  # 重复凭据包，丢弃
+                        else:
+                            self.http_credentials_cache[cred_fingerprint] = True
+                    else:
+                        # 容错：初始化HTTP凭据缓存
+                        try:
+                            from cachetools import TTLCache
+                            self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)
+                            self.http_credentials_cache[cred_fingerprint] = True
+                        except ImportError:
+                            self.http_credentials_cache = {}
+                            self.http_credentials_cache[cred_fingerprint] = True
+            
+            # 5. 进行实际的数据包处理
+            self._process_packet(packet_data)
+            
+        except Exception as e:
+            self.logger.error(f"Error in async packet processing: {e}")
+
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")
