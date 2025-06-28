@@ -32,17 +32,43 @@ bool ARPSpoofer::initialize() {
 }
 
 void ARPSpoofer::shutdown() {
+    std::cout << "[ARP Spoofer] Starting shutdown..." << std::endl;
+    
     // 停止所有活跃会话
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     
     for (auto& [ip, session] : active_sessions_) {
         if (session && session->active) {
+            std::cout << "[ARP Spoofer] Stopping session for " << ip << std::endl;
             session->active = false;
+            
+            // ★【修复】★ 先停止定时器线程
+            if (session->timer_active) {
+                session->timer_active = false;
+                if (session->timer_thread && session->timer_thread->joinable()) {
+                    try {
+                        session->timer_thread->join();
+                        std::cout << "[ARP Spoofer] Timer thread joined for " << ip << std::endl;
+                    } catch (const std::exception& e) {
+                        std::cout << "[ARP Spoofer] Timer thread join failed for " << ip << ": " << e.what() << std::endl;
+                    }
+                }
+                session->timer_thread.reset(); // ★ 显式重置
+            }
+            
+            // 然后停止欺骗线程
             if (session->spoof_thread && session->spoof_thread->joinable()) {
-                session->spoof_thread->join();
+                try {
+                    session->spoof_thread->join();
+                    std::cout << "[ARP Spoofer] Spoof thread joined for " << ip << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "[ARP Spoofer] Spoof thread join failed for " << ip << ": " << e.what() << std::endl;
+                }
             }
         }
     }
+    
+    // ★【修复】★ 清理会话
     active_sessions_.clear();
     
     if (raw_socket_ >= 0) {
@@ -149,17 +175,30 @@ bool ARPSpoofer::stop_spoofing(const std::string& target_ip) {
     auto& session = it->second;
     session->active = false;
     
-    // ★【新增】★ 停止定时器线程
+    std::cout << "[ARP Spoofer] Stopping spoofing for " << target_ip << std::endl;
+    
+    // ★【修复】★ 先停止定时器线程
     if (session->timer_active) {
         session->timer_active = false;
         if (session->timer_thread && session->timer_thread->joinable()) {
-            session->timer_thread->join();
+            try {
+                session->timer_thread->join();
+                std::cout << "[ARP Spoofer] Timer thread stopped for " << target_ip << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "[ARP Spoofer] Timer thread stop failed for " << target_ip << ": " << e.what() << std::endl;
+            }
         }
+        session->timer_thread.reset(); // ★ 显式重置
     }
     
-    // 停止欺骗线程
+    // 然后停止欺骗线程
     if (session->spoof_thread && session->spoof_thread->joinable()) {
-        session->spoof_thread->join();
+        try {
+            session->spoof_thread->join();
+            std::cout << "[ARP Spoofer] Spoof thread stopped for " << target_ip << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "[ARP Spoofer] Spoof thread stop failed for " << target_ip << ": " << e.what() << std::endl;
+        }
     }
     
     std::cout << "[ARP Spoofer] Stopped " << session->attack_type << " spoofing " << target_ip 

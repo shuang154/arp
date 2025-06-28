@@ -163,13 +163,26 @@ class PythonSupervisor:
                     
                     # 3. 检查指纹是否存在于近期缓存中
                     with self.cache_lock:
-                        if payload_hash in self.recent_packets_cache:
-                            # 如果存在，说明是重复包，直接丢弃
-                            self.logger.debug(f"🚫 Duplicate packet dropped (hash: {payload_hash[:8]})")
-                            continue
+                        if hasattr(self, 'recent_packets_cache') and self.recent_packets_cache is not None:
+                            if payload_hash in self.recent_packets_cache:
+                                # 如果存在，说明是重复包，直接丢弃
+                                self.logger.debug(f"🚫 Duplicate packet dropped (hash: {payload_hash[:8]})")
+                                continue
+                            else:
+                                # 如果是新包，将其指纹存入缓存
+                                self.recent_packets_cache[payload_hash] = True
                         else:
-                            # 如果是新包，将其指纹存入缓存
-                            self.recent_packets_cache[payload_hash] = True
+                            # 容错：初始化缓存
+                            try:
+                                from cachetools import TTLCache
+                                self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
+                                self.recent_packets_cache[payload_hash] = True
+                                self.logger.warning("🔧 Re-initialized packet deduplication cache")
+                            except ImportError:
+                                # 如果TTLCache不可用，使用简单字典
+                                self.recent_packets_cache = {}
+                                self.recent_packets_cache[payload_hash] = True
+                                self.logger.warning("🔧 Using simple dict for packet deduplication (TTLCache not available)")
                     # --- 去重逻辑结束 ---
                     
                     # 4. ★ 只有全新的、不重复的数据包才会被解码并提交到线程池
@@ -338,9 +351,14 @@ class PythonSupervisor:
         self.logger.info("Shutting down supervisor...")
         self.running = False
         
-        # 停止线程池
+        # 停止线程池 - 兼容不同Python版本
         if self.thread_pool:
-            self.thread_pool.shutdown(wait=True, timeout=5.0)
+            try:
+                # Python 3.9+ 支持timeout参数
+                self.thread_pool.shutdown(wait=True, timeout=5.0)
+            except TypeError:
+                # Python 3.8及以下版本
+                self.thread_pool.shutdown(wait=True)
             
         # 停止Web API
         if self.config.enable_web_api:
