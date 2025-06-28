@@ -161,36 +161,36 @@ class PythonSupervisor:
         try:
             # 1. Packet Receiver (C++ PUSH -> Python PULL)
             self.packet_receiver = self.context.socket(zmq.PULL)
-            self.packet_receiver.bind(self.config.get('ipc.packet_address'))
+            self.packet_receiver.bind(self.config.ipc.packet_address)
             self.packet_receiver.setsockopt(zmq.RCVTIMEO, 500)
-            self.packet_receiver.setsockopt(zmq.RCVHWM, 2000) # 增加缓冲区
+            self.packet_receiver.setsockopt(zmq.RCVHWM, self.config.ipc.packet_hwm)
 
             # 2. Command Sender (Python PUSH -> C++ PULL)
             self.command_sender = self.context.socket(zmq.PUSH)
-            # ★【关键修复】★ Python作为客户端，应该connect
-            self.command_sender.connect(self.config.get('ipc.command_address'))
+            self.command_sender.connect(self.config.ipc.command_address)
             self.command_sender.setsockopt(zmq.SNDTIMEO, 500)
-            self.command_sender.setsockopt(zmq.SNDHWM, 100)
+            self.command_sender.setsockopt(zmq.SNDHWM, self.config.ipc.command_hwm)
+            self.command_sender.setsockopt(zmq.LINGER, 0)
 
             # 3. Heartbeat PING Receiver (C++ PUSH -> Python PULL)
             self.heartbeat_receiver = self.heartbeat_context.socket(zmq.PULL)
-            self.heartbeat_receiver.bind(self.config.get('ipc.heartbeat_address'))
-            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 1000) # 心跳接收可以等待更久
-            self.heartbeat_receiver.setsockopt(zmq.RCVHWM, 10)
+            self.heartbeat_receiver.bind(self.config.ipc.heartbeat_ping_address)
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, self.config.heartbeat_timeout_ms)
+            self.heartbeat_receiver.setsockopt(zmq.RCVHWM, self.config.ipc.heartbeat_hwm)
+            self.heartbeat_receiver.setsockopt(zmq.LINGER, 0)
 
             # 4. Heartbeat PONG Sender (Python PUSH -> C++ PULL)
             self.heartbeat_sender = self.heartbeat_context.socket(zmq.PUSH)
-            # ★【关键修复】★ 连接到专用的PONG接收地址
-            self.heartbeat_sender.connect(self.config.get('ipc.heartbeat_pong_address'))
+            self.heartbeat_sender.connect(self.config.ipc.heartbeat_pong_address)
             self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 200)
-            self.heartbeat_sender.setsockopt(zmq.SNDHWM, 10)
+            self.heartbeat_sender.setsockopt(zmq.SNDHWM, self.config.ipc.heartbeat_hwm)
             self.heartbeat_sender.setsockopt(zmq.LINGER, 0)
 
             self.logger.info("ZMQ sockets initialized with correct roles:")
-            self.logger.info(f"  - Packet Receiver [PULL-BIND]   @ {self.config.get('ipc.packet_address')}")
-            self.logger.info(f"  - Command Sender  [PUSH-CONNECT] @ {self.config.get('ipc.command_address')}")
-            self.logger.info(f"  - Heartbeat PING  [PULL-BIND]   @ {self.config.get('ipc.heartbeat_address')}")
-            self.logger.info(f"  - Heartbeat PONG  [PUSH-CONNECT] @ {self.config.get('ipc.heartbeat_pong_address')}")
+            self.logger.info(f"  - Packet Receiver [PULL-BIND]   @ {self.config.ipc.packet_address}")
+            self.logger.info(f"  - Command Sender  [PUSH-CONNECT] @ {self.config.ipc.command_address}")
+            self.logger.info(f"  - Heartbeat PING  [PULL-BIND]   @ {self.config.ipc.heartbeat_ping_address}")
+            self.logger.info(f"  - Heartbeat PONG  [PUSH-CONNECT] @ {self.config.ipc.heartbeat_pong_address}")
             self.logger.info("🫀 All IPC channels are correctly configured.")
             
             return True
