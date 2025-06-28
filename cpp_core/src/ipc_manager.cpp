@@ -30,6 +30,11 @@ bool IPCManager::initialize() {
         packet_sender_->connect("ipc:///tmp/arp_spoofer_packets.ipc");
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000); // 使用新API
         
+        // ★【新增】★ 创建命令发送socket (PUSH模式) - 用于发送心跳等控制命令
+        command_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::push);
+        command_sender_->connect("ipc:///tmp/arp_spoofer_heartbeat.ipc");
+        command_sender_->set(zmq::sockopt::sndtimeo, 1000);
+        
         // 创建命令接收socket (PULL模式)  
         command_receiver_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pull);
         command_receiver_->connect("ipc:///tmp/arp_spoofer_commands.ipc");
@@ -49,6 +54,7 @@ void IPCManager::shutdown() {
     if (!initialized_) return;
     
     packet_sender_.reset();
+    command_sender_.reset();  // ★【新增】★ 清理命令发送socket
     command_receiver_.reset();
     context_.reset();
     
@@ -285,7 +291,7 @@ void IPCManager::heartbeat_loop() {
 }
 
 bool IPCManager::send_ping() {
-    if (!initialized_ || !packet_sender_) {
+    if (!initialized_ || !command_sender_) {  // ★【修改】★ 使用命令发送通道
         return false;
     }
     
@@ -309,11 +315,11 @@ bool IPCManager::send_ping() {
         Writer<StringBuffer> writer(buffer);
         doc.Accept(writer);
         
-        // 发送
+        // ★【修改】★ 通过命令发送通道发送
         zmq::message_t message(buffer.GetSize());
         memcpy(message.data(), buffer.GetString(), buffer.GetSize());
         
-        auto send_result = packet_sender_->send(message, zmq::send_flags::dontwait);
+        auto send_result = command_sender_->send(message, zmq::send_flags::dontwait);
         bool sent = send_result.has_value();
         if (sent) {
             last_ping_time_ = std::chrono::steady_clock::now();

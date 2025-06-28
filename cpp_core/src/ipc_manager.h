@@ -79,6 +79,7 @@ class IPCManager {
 private:
     std::unique_ptr<zmq::context_t> context_;
     std::unique_ptr<zmq::socket_t> packet_sender_;    // 发送数据包给Python
+    std::unique_ptr<zmq::socket_t> command_sender_;   // ★【新增】★ 发送命令给Python（心跳等）
     std::unique_ptr<zmq::socket_t> command_receiver_; // 接收Python的命令
     
     bool initialized_;
@@ -92,8 +93,8 @@ private:
     std::chrono::steady_clock::time_point last_pong_time_;
     std::function<void()> connection_lost_callback_;
     
-    static constexpr int HEARTBEAT_INTERVAL_MS = 10000;   // 10秒发送一次心跳（降低频率）
-    static constexpr int HEARTBEAT_TIMEOUT_MS = 30000;    // 30秒超时（增加容忍度）
+    static constexpr int HEARTBEAT_INTERVAL_MS = 5000;    // 5秒发送一次心跳（提高频率）
+    static constexpr int HEARTBEAT_TIMEOUT_MS = 60000;   // 60秒超时（增加容忍度）
 
 public:
     IPCManager();

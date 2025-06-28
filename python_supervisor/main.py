@@ -42,6 +42,7 @@ class PythonSupervisor:
         self.context = zmq.Context()
         self.packet_receiver = None
         self.command_sender = None
+        self.heartbeat_receiver = None  # ★【新增】★ 心跳接收通道
         
         # 核心组件
         self.state_cache = StateCache()
@@ -136,9 +137,15 @@ class PythonSupervisor:
             self.command_sender.bind(self.config.command_ipc_address)
             self.command_sender.setsockopt(zmq.SNDTIMEO, 1000)  # 1秒超时
             
+            # ★【新增】★ 接收心跳的套接字（PULL模式）
+            self.heartbeat_receiver = self.context.socket(zmq.PULL)
+            self.heartbeat_receiver.bind(self.config.ipc.heartbeat_address)
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 100)  # 100ms超时，更频繁检查
+            
             self.logger.info(f"ZMQ sockets initialized:")
             self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
             self.logger.info(f"  - Command sender: {self.config.command_ipc_address}")
+            self.logger.info(f"  - Heartbeat receiver: {self.config.ipc.heartbeat_address}")
             
             return True
             
@@ -226,12 +233,7 @@ class PythonSupervisor:
                                     self.http_credentials_cache[cred_fingerprint] = True
                                     self.logger.warning("🔧 Using simple dict for HTTP deduplication")
                     
-                    # 6. ★【新增】★ 检查是否为心跳PING（在主线程中快速处理）
-                    if packet_info.get('type') == 'PING':
-                        self._handle_ping(packet_info)
-                        continue
-                    
-                    # 7. ★ 只有经过所有过滤的高价值数据包才提交给线程池处理
+                    # 6. ★ 只有经过所有过滤的高价值数据包才提交给线程池处理
                     self.thread_pool.submit(self._process_packet, packet_data)
                     
                 except zmq.Again:
@@ -337,17 +339,30 @@ class PythonSupervisor:
         self.logger.info("Heartbeat mechanism stopped")
     
     def _heartbeat_loop(self):
-        """心跳监听循环"""
+        """心跳监听循环 - 使用专用心跳通道"""
         while self.heartbeat_running and self.running:
             try:
-                # 检查是否收到PING，如果是则回复PONG
-                current_time = time.time()
+                # ★【新增】★ 从专用心跳通道接收PING消息
+                try:
+                    raw_data = self.heartbeat_receiver.recv(zmq.NOBLOCK)
+                    heartbeat_data = raw_data.decode('utf-8')
+                    ping_info = json.loads(heartbeat_data)
+                    
+                    if ping_info.get('type') == 'PING':
+                        self._handle_ping(ping_info)
+                        
+                except zmq.Again:
+                    # 没有心跳数据，继续下一次循环
+                    pass
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self.logger.warning(f"Invalid heartbeat data: {e}")
                 
-                # 每5秒检查一次连接状态
+                # 检查连接状态
+                current_time = time.time()
                 if current_time - self.last_ping_time > 20:  # 20秒没收到ping
                     self.logger.warning("⚠️  No heartbeat from C++ core for 20+ seconds")
                 
-                time.sleep(1)
+                time.sleep(0.1)  # ★【优化】★ 减少休眠时间，提高响应性
                 
             except Exception as e:
                 self.logger.error(f"Heartbeat loop error: {e}")
@@ -440,6 +455,9 @@ class PythonSupervisor:
             if self.command_sender:
                 self.command_sender.close()
                 self.logger.info("📤 Command sender socket closed")
+            if self.heartbeat_receiver:  # ★【新增】★ 关闭心跳接收器
+                self.heartbeat_receiver.close()
+                self.logger.info("❤️ Heartbeat receiver socket closed")
         except Exception as e:
             self.logger.warning(f"ZMQ socket cleanup error: {e}")
             

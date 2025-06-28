@@ -22,6 +22,7 @@ class IPCConfig:
     """IPC通信配置"""
     packet_address: str = "ipc:///tmp/arp_spoofer_packets.ipc"
     command_address: str = "ipc:///tmp/arp_spoofer_commands.ipc"
+    heartbeat_address: str = "ipc:///tmp/arp_spoofer_heartbeat.ipc"  # ★【新增】★ 心跳专用通道
 
 @dataclass
 class PerformanceConfig:
@@ -120,6 +121,16 @@ class Config:
     def command_ipc_address(self, value: str):
         """设置命令IPC地址"""
         self.ipc.command_address = value
+    
+    # ★【新增】★ 心跳地址便捷属性
+    @property
+    def heartbeat_ipc_address(self) -> str:
+        return self.ipc.heartbeat_address
+    
+    @heartbeat_ipc_address.setter
+    def heartbeat_ipc_address(self, value: str):
+        """设置心跳IPC地址"""
+        self.ipc.heartbeat_address = value
     
     @property
     def max_worker_threads(self) -> int:
