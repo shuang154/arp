@@ -18,6 +18,10 @@ ipc:
   # ★【新增】★ 心跳配置
   heartbeat_interval: 5000       # 心跳间隔(ms)
   heartbeat_timeout: 20000       # 心跳超时(ms) - 适当延长以应对启动延迟
+  # ★【关键修复】★ HWM配置，防止消息堆积
+  packet_hwm: 1000               # 数据包通道HWM
+  command_hwm: 500               # 命令通道HWM  
+  heartbeat_hwm: 1               # 心跳通道HWM，设为1防止堆积
 
 # 性能配置 (香橙派优化)
 performance:

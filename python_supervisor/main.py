@@ -723,6 +723,12 @@ class PythonSupervisor:
             try:
                 # ★【紧急修复】★ 更短的polling间隔，避免心跳饥饿
                 message = self.heartbeat_receiver.recv_string(zmq.NOBLOCK)
+                
+                # ★【增强鲁棒性】★ 检查空消息
+                if not message or not message.strip():
+                    print("⚠️  HEARTBEAT WARNING: Received empty message, ignoring")
+                    continue
+                    
                 ping_data = json.loads(message)
                 
                 # ★【关键修复】★ C++端发送的是大写的"PING"而不是小写的"ping"
@@ -754,6 +760,12 @@ class PythonSupervisor:
                 
                 # ★【紧急修复】★ 极短的睡眠时间，确保高响应性
                 time.sleep(0.01)  # 10ms而不是100ms
+                continue
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                # ★【鲁棒性增强】★ 捕获JSON解析错误和值错误，避免心跳线程崩溃
+                print(f"⚠️  HEARTBEAT WARNING: Invalid JSON message: {e}")
+                time.sleep(0.05)
                 continue
                 
             except Exception as e:

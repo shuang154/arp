@@ -46,7 +46,11 @@ public:
         std::string heartbeat_address = "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc";
         std::string heartbeat_pong_address = "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc";
         int heartbeat_interval = 5000;   // ms
-        int heartbeat_timeout = 20000; // ms
+        int heartbeat_timeout = 20000;   // ms
+        // ★【关键修复】★ HWM配置
+        int packet_hwm = 1000;          // 数据包通道HWM
+        int command_hwm = 500;          // 命令通道HWM
+        int heartbeat_hwm = 1;          // 心跳通道HWM，设为1防止堆积
     };
 
     struct Config {
@@ -99,6 +103,10 @@ public:
     std::string get_heartbeat_pong_address() const;
     int get_heartbeat_interval() const;
     int get_heartbeat_timeout() const;
+    // ★【关键修复】★ HWM配置获取方法
+    int get_packet_hwm() const;
+    int get_command_hwm() const;
+    int get_heartbeat_hwm() const;
     
     // 配置变化监听
     void start_monitoring();

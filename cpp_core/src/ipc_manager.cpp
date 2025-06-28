@@ -20,12 +20,12 @@ IPCManager::IPCManager(const ConfigManager& config)
         
         packet_sender_ = std::make_unique<zmq::socket_t>(*main_context_, zmq::socket_type::push);
         packet_sender_->connect(config_.get_packet_address());
-        packet_sender_->set(zmq::sockopt::sndhwm, 1000); // 允许一定的包缓冲
+        packet_sender_->set(zmq::sockopt::sndhwm, config_.get_packet_hwm()); // ★【修复】★ 使用配置的HWM
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000);
 
         command_receiver_ = std::make_unique<zmq::socket_t>(*main_context_, zmq::socket_type::pull);
         command_receiver_->bind(config_.get_command_address());
-        command_receiver_->set(zmq::sockopt::rcvhwm, 100); // 允许一定的命令缓冲
+        command_receiver_->set(zmq::sockopt::rcvhwm, config_.get_command_hwm()); // ★【修复】★ 使用配置的HWM
         command_receiver_->set(zmq::sockopt::rcvtimeo, 1000); // 非阻塞接收
 
         // 2. 初始化心跳Context和心跳Sockets
@@ -34,13 +34,14 @@ IPCManager::IPCManager(const ConfigManager& config)
         // PING Sender (C++ PUSH -> Python PULL)
         heartbeat_ping_sender_ = std::make_unique<zmq::socket_t>(*heartbeat_context_, zmq::socket_type::push);
         heartbeat_ping_sender_->connect(config_.get_heartbeat_address());
-        heartbeat_ping_sender_->set(zmq::sockopt::sndhwm, 10);
+        heartbeat_ping_sender_->set(zmq::sockopt::sndhwm, config_.get_heartbeat_hwm()); // ★【修复】★ 使用配置的HWM
         heartbeat_ping_sender_->set(zmq::sockopt::linger, 0);
+        heartbeat_ping_sender_->set(zmq::sockopt::immediate, 1);   // ★【修复】★ 立即发送，不排队
 
         // PONG Receiver (Python PUSH -> C++ PULL)
         heartbeat_pong_receiver_ = std::make_unique<zmq::socket_t>(*heartbeat_context_, zmq::socket_type::pull);
         heartbeat_pong_receiver_->bind(config_.get_heartbeat_pong_address());
-        heartbeat_pong_receiver_->set(zmq::sockopt::rcvhwm, 10);
+        heartbeat_pong_receiver_->set(zmq::sockopt::rcvhwm, config_.get_heartbeat_hwm()); // ★【修复】★ 使用配置的HWM
         heartbeat_pong_receiver_->set(zmq::sockopt::rcvtimeo, 100); // 短超时，用于poll
 
         // 3. 初始化心跳状态并启动线程
@@ -85,7 +86,7 @@ void IPCManager::heartbeat_thread_func() {
     while (!shutdown_flag_) {
         auto now = std::chrono::steady_clock::now();
 
-        // 1. 发送 PING (JSON格式)
+        // 1. 发送 PING (JSON格式) - ★【修复】★ 深拷贝+阻塞发送+EHOSTUNREACH捕获
         if (now - last_ping_time > ping_interval) {
             try {
                 // ★【修复】★ 发送JSON格式的PING消息，匹配Python期望的格式
@@ -94,14 +95,23 @@ void IPCManager::heartbeat_thread_func() {
                         std::chrono::system_clock::now().time_since_epoch()).count()) +
                     R"(,"sequence":)" + std::to_string(pings_sent_) + "}";
                 
-                zmq::message_t ping_msg(ping_json.data(), ping_json.size());
-                if (heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::dontwait)) {
+                // ★【关键修复】★ 使用深拷贝避免悬空指针
+                zmq::message_t ping_msg(ping_json.size());
+                memcpy(ping_msg.data(), ping_json.c_str(), ping_json.size());
+                
+                // ★【关键修复】★ 使用阻塞发送（send_flags::none），确保消息被完整发送
+                if (heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::none)) {
                     pings_sent_++;
                     // std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // 调试时开启
                 }
                 last_ping_time = now;
             } catch (const zmq::error_t& e) {
-                std::cerr << "[Heartbeat] Failed to send PING: " << e.what() << std::endl;
+                // ★【关键修复】★ 捕获EHOSTUNREACH等网络错误，避免程序崩溃
+                if (e.num() == EHOSTUNREACH) {
+                    std::cerr << "[Heartbeat] Network unreachable (EHOSTUNREACH), retrying..." << std::endl;
+                } else if (e.num() != ETERM) {
+                    std::cerr << "[Heartbeat] Failed to send PING: " << e.what() << " (errno: " << e.num() << ")" << std::endl;
+                }
             }
         }
 

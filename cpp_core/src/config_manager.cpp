@@ -112,6 +112,22 @@ int ConfigManager::get_heartbeat_timeout() const {
     return current_config_.ipc.heartbeat_timeout;
 }
 
+// ★【关键修复】★ HWM配置获取方法实现
+int ConfigManager::get_packet_hwm() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.packet_hwm;
+}
+
+int ConfigManager::get_command_hwm() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.command_hwm;
+}
+
+int ConfigManager::get_heartbeat_hwm() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return current_config_.ipc.heartbeat_hwm;
+}
+
 
 void ConfigManager::start_monitoring() {
     if (monitoring_) {
@@ -264,6 +280,10 @@ bool ConfigManager::parse_yaml_config(const std::string& content, Config& config
             config.ipc.heartbeat_pong_address = ipc_node["heartbeat_pong_address"].as<std::string>(config.ipc.heartbeat_pong_address);
             config.ipc.heartbeat_interval = ipc_node["heartbeat_interval"].as<int>(config.ipc.heartbeat_interval);
             config.ipc.heartbeat_timeout = ipc_node["heartbeat_timeout"].as<int>(config.ipc.heartbeat_timeout);
+            // ★【关键修复】★ 加载HWM配置
+            config.ipc.packet_hwm = ipc_node["packet_hwm"].as<int>(config.ipc.packet_hwm);
+            config.ipc.command_hwm = ipc_node["command_hwm"].as<int>(config.ipc.command_hwm);
+            config.ipc.heartbeat_hwm = ipc_node["heartbeat_hwm"].as<int>(config.ipc.heartbeat_hwm);
         }
 
         // 解析 network 部分
