@@ -81,11 +81,12 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
             existing_session->duration_seconds = duration_seconds;
             existing_session->attack_type = attack_type;
             
-            // 启动新的定时器（如果有duration）
+            // ★【修改】★ 启动新的定时器，使用weak_ptr
             if (duration_seconds > 0) {
                 existing_session->timer_active = true;
-                existing_session->timer_thread = std::make_unique<std::thread>(
-                    &ARPSpoofer::timer_thread_func, this, target_ip, duration_seconds
+                std::weak_ptr<SpoofSession> session_weak_ptr = existing_session;
+                existing_session->timer_thread = std::make_shared<std::thread>(
+                    &ARPSpoofer::timer_thread_func, this, target_ip, duration_seconds, session_weak_ptr
                 );
             }
             
@@ -96,8 +97,8 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
         }
     }
     
-    // 创建新的欺骗会话
-    auto session = std::make_unique<SpoofSession>();
+    // ★【修改】★ 创建新的欺骗会话，使用shared_ptr
+    auto session = std::make_shared<SpoofSession>();
     session->target_ip = target_ip;
     session->target_mac = target_mac;
     session->gateway_ip = gateway_ip;
@@ -114,11 +115,12 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
         &ARPSpoofer::spoof_thread_func, this, target_ip
     );
     
-    // ★【新增】★ 如果有duration，启动定时器线程
+    // ★【新增】★ 如果有duration，启动定时器线程，使用weak_ptr
     if (duration_seconds > 0) {
         session->timer_active = true;
-        session->timer_thread = std::make_unique<std::thread>(
-            &ARPSpoofer::timer_thread_func, this, target_ip, duration_seconds
+        std::weak_ptr<SpoofSession> session_weak_ptr = session;
+        session->timer_thread = std::make_shared<std::thread>(
+            &ARPSpoofer::timer_thread_func, this, target_ip, duration_seconds, session_weak_ptr
         );
     }
     
@@ -324,36 +326,26 @@ void ARPSpoofer::spoof_thread_func(const std::string& target_ip) {
     std::cout << "[ARP Spoofer] Spoof thread ended for " << target_ip << std::endl;
 }
 
-void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t duration_seconds) {
+// ★【修改】★ 定时器线程函数，使用weak_ptr确保线程安全
+void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t duration_seconds, 
+                                  std::weak_ptr<SpoofSession> session_weak_ptr) {
     std::cout << "[ARP Spoofer] Timer started for " << target_ip << " - " << duration_seconds << " seconds" << std::endl;
-    
-    // 获取当前会话的timer_active引用，以便检查是否被外部取消
-    std::shared_ptr<std::atomic<bool>> timer_active_ptr;
-    {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        auto it = active_sessions_.find(target_ip);
-        if (it != active_sessions_.end() && it->second) {
-            // 创建一个共享指针指向timer_active，避免悬空指针
-            timer_active_ptr = std::make_shared<std::atomic<bool>>(true);
-            // 注意：这里我们需要一个更安全的方式来处理这个引用
-        } else {
-            std::cout << "[ARP Spoofer] Timer thread: session not found for " << target_ip << std::endl;
-            return;
-        }
-    }
     
     // 等待指定的时间，每秒检查一次是否被取消
     for (uint32_t elapsed = 0; elapsed < duration_seconds; elapsed++) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         
-        // 检查会话是否仍然存在且定时器仍然活跃
-        {
-            std::lock_guard<std::mutex> lock(sessions_mutex_);
-            auto it = active_sessions_.find(target_ip);
-            if (it == active_sessions_.end() || !it->second || !it->second->timer_active) {
+        // ★【修改】★ 在访问前，先尝试将弱引用指针提升为强引用指针
+        if (auto session_shared_ptr = session_weak_ptr.lock()) {
+            // 如果提升成功，说明会话仍然存在
+            if (!session_shared_ptr->timer_active) {
                 std::cout << "[ARP Spoofer] Timer cancelled for " << target_ip << " at " << elapsed << "s" << std::endl;
                 return;
             }
+        } else {
+            // 如果提升失败，说明会话已被主线程销毁，定时器线程应立即安全退出
+            std::cout << "[ARP Spoofer] Timer exits as session is already destroyed for " << target_ip << std::endl;
+            return;
         }
     }
     
@@ -362,14 +354,13 @@ void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t durati
     
     // 获取恢复网络所需的信息
     std::string gateway_ip, target_mac, gateway_mac;
-    {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        auto it = active_sessions_.find(target_ip);
-        if (it != active_sessions_.end() && it->second) {
-            gateway_ip = it->second->gateway_ip;
-            target_mac = it->second->target_mac;
-            gateway_mac = it->second->gateway_mac;
-        }
+    if (auto session_shared_ptr = session_weak_ptr.lock()) {
+        gateway_ip = session_shared_ptr->gateway_ip;
+        target_mac = session_shared_ptr->target_mac;
+        gateway_mac = session_shared_ptr->gateway_mac;
+    } else {
+        std::cout << "[ARP Spoofer] Session destroyed before timer completion for " << target_ip << std::endl;
+        return;
     }
     
     // 停止攻击

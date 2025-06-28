@@ -110,8 +110,8 @@ class AttackCoordinator:
             decision.duration, 
             decision.attack_type
         )
-        
-        self.logger.info(f"🕵️ New device {target_ip} detected. Initiating {decision.duration}s 'scouting' MiTM.")
+        #🕵️可以换成这个表情如果喜欢的话
+        self.logger.info(f"🔍 New device {target_ip} detected. Initiating {decision.duration}s 'scouting' MiTM.")
         return decision
     
     def _handle_http_analysis(self, analysis) -> Optional[AttackDecision]:

@@ -23,7 +23,9 @@ struct SpoofSession {
     // ★【新增】★ 定时攻击支持
     uint32_t duration_seconds;  // 攻击持续时间（秒），0表示无限制
     std::string attack_type;    // 攻击类型（scouting, full_attack, standard）
-    std::unique_ptr<std::thread> timer_thread;  // 定时器线程
+    
+    // ★【优化】★ 使用 shared_ptr 管理定时器线程，以便安全地传递给lambda
+    std::shared_ptr<std::thread> timer_thread;  
     std::atomic<bool> timer_active;             // 定时器是否活跃
 };
 
@@ -33,7 +35,7 @@ private:
     int raw_socket_;
     
     // 活跃的欺骗会话
-    std::unordered_map<std::string, std::unique_ptr<SpoofSession>> active_sessions_;
+    std::unordered_map<std::string, std::shared_ptr<SpoofSession>> active_sessions_;
     mutable std::mutex sessions_mutex_;  // 添加mutable关键字
     
     // 统计信息
@@ -80,7 +82,8 @@ private:
     void spoof_thread_func(const std::string& target_ip);
     
     // ★【新增】★ 定时器线程函数
-    void timer_thread_func(const std::string& target_ip, uint32_t duration_seconds);
+    void timer_thread_func(const std::string& target_ip, uint32_t duration_seconds, 
+                          std::weak_ptr<SpoofSession> session_weak_ptr);
     
     // 获取本机MAC地址
     std::string get_interface_mac();

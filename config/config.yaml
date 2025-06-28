@@ -37,14 +37,14 @@ cpu_affinity:
 attack:
   stealth_mode: false            # 隐蔽模式
   attack_timeout: 45             # 攻击超时时间(秒)
-  max_concurrent_attacks: 20     # 最大并发攻击数 (香橙派优化)
+  max_concurrent_attacks: 40     # 最大并发攻击数 (香橙派优化)
   cooldown_time: 3600           # 冷却时间(秒)
   
   # ★【新增】★ 分级递进式攻击策略
   strategy:
     scouting_duration: 60       # 侦察窗口持续时间（秒）- 1分钟
     full_attack_duration: 60   # 升级为全面攻击后的持续时间（秒）- 1分钟
-    high_value_ports: [801, 443] # 高价值端口列表
+    high_value_ports: [801] # 高价值端口列表
     immediate_restore_on_success: true  # 捕获凭据后立即恢复网络
 
 # 缓存配置

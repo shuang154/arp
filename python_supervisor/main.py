@@ -18,7 +18,9 @@ import logging
 import argparse
 import signal
 import sys
+import hashlib  # ★【新增】★ 用于计算数据包指纹
 from concurrent.futures import ThreadPoolExecutor
+from cachetools import TTLCache  # ★【新增】★ 用于去重缓存
 from dataclasses import dataclass
 from typing import Optional, Dict, Set
 from datetime import datetime, timedelta
@@ -67,6 +69,13 @@ class PythonSupervisor:
             'attacks_launched': 0,
             'credentials_captured': 0
         }
+        
+        # ★★★【新增】★★★ 入口去重缓存 
+        # 缓存最近500个数据包的哈希值，有效期3秒
+        # 这意味着3秒内到达的完全相同的数据包将被视为重复
+        # 这些值可以根据实际网络情况调整
+        self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
+        self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
         
         # 设置日志
         self._setup_logging()
@@ -144,19 +153,34 @@ class PythonSupervisor:
         try:
             while self.running:
                 try:
-                    # 接收数据包（二进制数据）
+                    # 1. 接收原始二进制数据
                     raw_data = self.packet_receiver.recv(zmq.NOBLOCK)
                     self.stats['packets_received'] += 1
                     
-                    # 尝试解码为字符串
+                    # ★★★【核心优化】★★★ 在提交到线程池前进行去重
+                    # 2. 计算数据包的哈希值作为唯一"指纹"
+                    payload_hash = hashlib.sha1(raw_data).hexdigest()
+                    
+                    # 3. 检查指纹是否存在于近期缓存中
+                    with self.cache_lock:
+                        if payload_hash in self.recent_packets_cache:
+                            # 如果存在，说明是重复包，直接丢弃
+                            self.logger.debug(f"🚫 Duplicate packet dropped (hash: {payload_hash[:8]})")
+                            continue
+                        else:
+                            # 如果是新包，将其指纹存入缓存
+                            self.recent_packets_cache[payload_hash] = True
+                    # --- 去重逻辑结束 ---
+                    
+                    # 4. ★ 只有全新的、不重复的数据包才会被解码并提交到线程池
                     try:
                         packet_data = raw_data.decode('utf-8')
-                    except UnicodeDecodeError as ude:
+                    except UnicodeDecodeError:
                         # 如果不是UTF-8，尝试替换无效字符
                         packet_data = raw_data.decode('utf-8', errors='replace')
                         self.logger.debug(f"Received data with encoding issues, replaced invalid chars")
                     
-                    # 验证是否为有效JSON
+                    # 验证是否为有效JSON（快速检查）
                     try:
                         packet_info = json.loads(packet_data)
                         
@@ -169,7 +193,7 @@ class PythonSupervisor:
                         self.logger.warning(f"Received invalid JSON data, skipping")
                         continue
                     
-                    # 提交给线程池处理
+                    # ★ 只有经过去重的全新数据包才提交给线程池处理
                     self.thread_pool.submit(self._process_packet, packet_data)
                     
                 except zmq.Again:
