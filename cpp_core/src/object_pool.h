@@ -14,11 +14,10 @@
 template<typename T>
 class ObjectPool {
 private:
-    std::queue<std::unique_ptr<T>> pool_;
-    std::mutex pool_mutex_;
-    std::function<std::unique_ptr<T>()> factory_;
-    size_t max_size_;
+    std::vector<T*> pool_;
+    mutable std::mutex pool_mutex_; // ★【修复】★ 声明为mutable，允许在const函数中加锁
     size_t initial_size_;
+    size_t max_size_;
     
     // 统计信息
     std::atomic<uint64_t> objects_created_;
@@ -42,7 +41,7 @@ public:
         // 预分配对象到池中
         std::lock_guard<std::mutex> lock(pool_mutex_);
         for (size_t i = 0; i < initial_size_; ++i) {
-            pool_.push(factory_());
+            pool_.push_back(new T());
             objects_created_++;
         }
     }
@@ -55,11 +54,11 @@ public:
         std::lock_guard<std::mutex> lock(pool_mutex_);
         
         if (!pool_.empty()) {
-            auto obj = std::move(pool_.front());
-            pool_.pop();
+            auto obj = pool_.back();
+            pool_.pop_back();
             pool_hits_++;
             objects_reused_++;
-            return obj;
+            return std::unique_ptr<T>(obj);
         }
         
         // 池为空，创建新对象
@@ -80,7 +79,7 @@ public:
         if (pool_.size() < max_size_) {
             // 重置对象状态（如果需要）
             reset_object(obj.get());
-            pool_.push(std::move(obj));
+            pool_.push_back(obj.release());
         }
         // 如果池已满，对象会自动销毁
     }
@@ -121,9 +120,10 @@ public:
      */
     void clear() {
         std::lock_guard<std::mutex> lock(pool_mutex_);
-        while (!pool_.empty()) {
-            pool_.pop();
+        for (auto obj : pool_) {
+            delete obj;
         }
+        pool_.clear();
     }
 
 private:
@@ -141,18 +141,22 @@ private:
 
 class PacketInfoPool : public ObjectPool<PacketInfo> {
 public:
-    PacketInfoPool(size_t initial_size = 1000, size_t max_size = 5000)
-        : ObjectPool<PacketInfo>(
-            []() { return std::make_unique<PacketInfo>(); },
-            initial_size, 
-            max_size
-        ) {}
+    PacketInfoPool(size_t initial_size, size_t max_size)
+        : ObjectPool<PacketInfo>(initial_size, max_size) {}
 
-private:
+protected:
+    PacketInfo* create_new() override {
+        return new PacketInfo();
+    }
+
     void reset_object(PacketInfo* pkt) override {
-        // 调用PacketInfo的reset方法
         if (pkt) {
-            pkt->reset();
+            pkt->timestamp = 0;
+            pkt->src_ip.clear();
+            pkt->dst_ip.clear();
+            pkt->protocol = 0;
+            pkt->length = 0;
+            pkt->data.clear();
         }
     }
 };

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <unordered_set> // 添加此行以包含unordered_set头文件
 
 // ARP欺骗会话信息
 struct SpoofSession {

@@ -82,7 +82,7 @@ public:
         }
 
         std::cout << "[C++ Core] Core modules initialized successfully." << std::endl;
-        print_system_info();
+        utils::print_system_info(); // ★【修复】★ 调用正确的命名空间函数
         return true;
     }
 
@@ -119,27 +119,22 @@ public:
 private:
     void process_command(const IPCCommand& cmd) {
         // (这里的命令处理逻辑保持不变)
-        switch (cmd.type) {
-            case CommandType::START_SPOOF:
-                std::cout << "[Command] Received START_SPOOF for " << cmd.target_ip << std::endl;
-                spoofer_->add_target(cmd.target_ip, cmd.gateway_ip);
-                break;
-            case CommandType::STOP_SPOOF:
-                std::cout << "[Command] Received STOP_SPOOF for " << cmd.target_ip << std::endl;
-                spoofer_->remove_target(cmd.target_ip);
-                break;
-            case CommandType::RESTORE_ARP:
-                 std::cout << "[Command] Received RESTORE_ARP for " << cmd.target_ip << std::endl;
-                 spoofer_->restore_arp(cmd.target_ip, cmd.gateway_ip);
-                 break;
-            case CommandType::SHUTDOWN:
-                std::cout << "[Command] Received SHUTDOWN command." << std::endl;
-                running_flag_ = false;
-                break;
-            default:
-                std::cerr << "[Command] Received unknown command type." << std::endl;
-                break;
+        if (cmd.type == "START_SPOOF") {
+        // ★【修复】★ 直接调用spoofer，不再需要add_target
+        spoofer_->start_spoofing(cmd.target_ip, cmd.gateway_ip, cmd.duration);
+    } else if (cmd.type == "RESTORE_ARP") {
+        // ★【修复】★ 提供所有需要的参数
+        if (!cmd.target_mac.empty() && !cmd.gateway_mac.empty()) {
+            spoofer_->restore_arp(cmd.target_ip, cmd.gateway_ip, cmd.target_mac, cmd.gateway_mac);
+        } else {
+            logger_->warn("Cannot restore ARP, MAC addresses missing for IP: {}", cmd.target_ip);
         }
+    } else if (cmd.type == "SHUTDOWN") {
+        logger_->info("Shutdown command received, initiating graceful shutdown...");
+        running_flag_.store(false);
+    } else {
+        std::cerr << "[Command] Received unknown command type." << std::endl;
+    }
     }
 };
 
