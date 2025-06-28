@@ -373,8 +373,9 @@ class PythonSupervisor:
     def _handle_ping(self, ping_data):
         """处理心跳PING，使用独立通道发送PONG"""
         try:
+            # ★【关键修复】★ 使用C++端期望的命令类型PONG而不是pong
             pong_response = {
-                "type": "pong",
+                "type": "PONG",
                 "timestamp": time.time(),
                 "supervisor_id": "python_supervisor"
             }
@@ -468,8 +469,20 @@ class PythonSupervisor:
         """执行攻击决策 - 使用队列而不是直接发送"""
         try:
             # ★【关键修复】★ AttackDecision是dataclass对象，使用属性访问而不是字典下标
+            # ★【关键修复】★ 修正命令类型，匹配C++端期望的格式
+            if decision.action == "attack":
+                command_type = "START_SPOOF"
+            elif decision.action == "restore": 
+                command_type = "RESTORE_ARP"
+            elif decision.action == "ignore":
+                # ignore类型不需要发送命令给C++端
+                return
+            else:
+                self.logger.warning(f"Unknown decision action: {decision.action}")
+                return
+                
             command = {
-                "type": decision.action,
+                "type": command_type,
                 "target_ip": decision.target_ip,
                 "gateway_ip": decision.gateway_ip or "10.17.0.1",
                 "target_mac": decision.target_mac or "",
@@ -529,7 +542,8 @@ class PythonSupervisor:
         
         # 发送关闭信号给C++核心
         try:
-            shutdown_cmd = {"type": "shutdown"}
+            # ★【关键修复】★ 使用C++端期望的命令类型SHUTDOWN而不是shutdown
+            shutdown_cmd = {"type": "SHUTDOWN"}
             # ★【关键修复】★ 使用正确的方法名_queue_command而不是不存在的_send_command
             self._queue_command(shutdown_cmd)
             self.logger.info("📤 Shutdown signal sent to C++ core")
@@ -592,7 +606,8 @@ class PythonSupervisor:
                 message = self.heartbeat_receiver.recv_string(zmq.NOBLOCK)
                 ping_data = json.loads(message)
                 
-                if ping_data.get("type") == "ping":
+                # ★【关键修复】★ C++端发送的是大写的"PING"而不是小写的"ping"
+                if ping_data.get("type") == "PING":
                     with self.stats_lock:
                         self.stats['heartbeat_received'] += 1
                     self._handle_ping(ping_data)
