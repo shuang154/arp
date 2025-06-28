@@ -236,8 +236,39 @@ class PythonSupervisor:
         except KeyboardInterrupt:
             self.logger.info("Received interrupt signal")
         finally:
-            self._shutdown()
+            self.shutdown()
             
+    def _process_packet_with_dedup(self, raw_data: bytes):
+        """处理数据包并进行去重 - 在工作线程中执行的优化版本"""
+        try:
+            # 1. 将原始二进制数据转换为字符串
+            packet_data = raw_data.decode('utf-8')
+            
+            # 2. ★【关键优化】★ 快速哈希去重，避免重复处理
+            packet_hash = hashlib.md5(packet_data.encode()).hexdigest()
+            
+            with self.cache_lock:
+                if packet_hash in self.recent_packets_cache:
+                    with self.stats_lock:
+                        self.stats['packets_dropped'] += 1
+                    return  # 重复数据包，直接丢弃
+                
+                # 添加到去重缓存
+                self.recent_packets_cache[packet_hash] = True
+            
+            # 3. 执行实际的数据包处理
+            self._process_packet(packet_data)
+            
+        except UnicodeDecodeError:
+            # 二进制数据解码失败
+            with self.stats_lock:
+                self.stats['packets_dropped'] += 1
+            self.logger.debug("Failed to decode packet data")
+        except Exception as e:
+            with self.stats_lock:
+                self.stats['packets_dropped'] += 1
+            self.logger.error(f"Error in packet processing with dedup: {e}")
+    
     def _process_packet(self, packet_data: str):
         """处理单个数据包"""
         try:
