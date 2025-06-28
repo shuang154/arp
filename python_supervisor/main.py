@@ -43,14 +43,15 @@ class PythonSupervisor:
         self._setup_logging()
         
         # ZMQ上下文和套接字
-        self.context = zmq.Context()
-        # ★【新增】★ 独立的心跳ZMQ上下文，避免GIL争用
-        self.heartbeat_context = zmq.Context()
+        self.context = zmq.Context()  # 主业务通信上下文
         self.packet_receiver = None
         self.command_sender = None
-        self.heartbeat_receiver = None  # ★【新增】★ 心跳接收通道
-        self.heartbeat_sender = None    # ★【新增】★ 心跳线程专用发送通道
-        self.heartbeat_sender_dedicated = None  # ★【新增】★ 独立心跳上下文的发送通道
+        
+        # ★【架构重构】★ 独立心跳通信系统
+        self.heartbeat_context = zmq.Context()  # 独立心跳ZMQ上下文，避免GIL争用
+        self.heartbeat_receiver = None          # 心跳接收通道
+        self.heartbeat_sender = None            # 心跳发送通道
+        self.heartbeat_dedicated_thread = None  # 专用心跳线程
         
         # ★【ARM优化】★ 检测平台并调整参数
         self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
@@ -172,10 +173,10 @@ class PythonSupervisor:
             self.command_sender.setsockopt(zmq.SNDHWM, self.config.ipc.command_hwm)
             self.command_sender.setsockopt(zmq.LINGER, 0)
 
-            # 3. Heartbeat PING Receiver (C++ PUSH -> Python PULL)
+            # 3. Heartbeat PING Receiver (C++ PUSH -> Python PULL) - ★【独立上下文】★
             self.heartbeat_receiver = self.heartbeat_context.socket(zmq.PULL)
             self.heartbeat_receiver.bind(self.config.ipc.heartbeat_ping_address)
-            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, self.config.ipc.heartbeat_timeout)
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, 100)  # ★【修复】★ 短超时，避免阻塞
             self.heartbeat_receiver.setsockopt(zmq.RCVHWM, self.config.ipc.heartbeat_hwm)
             self.heartbeat_receiver.setsockopt(zmq.LINGER, 0)
 
@@ -648,27 +649,125 @@ class PythonSupervisor:
         self.logger.info("✅ Supervisor shutdown complete")
 
     def start_heartbeat(self):
-        """启动心跳监听线程"""
+        """★【架构重构】★ 启动独立的专用心跳线程"""
         if self.heartbeat_running:
             return
             
         self.heartbeat_running = True
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True, name="HeartbeatLoop")
-        self.heartbeat_thread.start()
-        self.logger.info("🫀 Heartbeat loop started, waiting for PING from C++ core...")
+        # ★【关键修复】★ 创建专用心跳线程，完全独立于主业务逻辑
+        self.heartbeat_dedicated_thread = threading.Thread(
+            target=self._dedicated_heartbeat_loop, 
+            daemon=False,  # ★【重要】★ 非守护线程，确保正常关闭
+            name="DedicatedHeartbeat"
+        )
+        self.heartbeat_dedicated_thread.start()
+        self.logger.info("🫀 Dedicated heartbeat thread started, isolated from main business logic")
     
     def stop_heartbeat(self):
         """停止心跳机制"""
         self.heartbeat_running = False
-        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
-            self.heartbeat_thread.join(timeout=1.0)
-        self.logger.info("Heartbeat mechanism stopped")
+        if self.heartbeat_dedicated_thread and self.heartbeat_dedicated_thread.is_alive():
+            self.heartbeat_dedicated_thread.join(timeout=2.0)
+        self.logger.info("Dedicated heartbeat thread stopped")
     
-    def _heartbeat_loop(self):
-        """心跳监听循环 - 高优先级，确保及时响应"""
-        # ★【跨平台修复】★ 设置线程优先级
+    def _dedicated_heartbeat_loop(self):
+        """★【架构重构】★ 专用心跳循环 - 完全独立，最高优先级，零业务干扰"""
+        # ★【性能优化】★ 设置线程优先级
         self._set_thread_priority_high()
+        
+        self.logger.info("🔥 Dedicated heartbeat thread started - ZERO business interference")
+        
+        heartbeat_failures = 0
+        last_heartbeat_time = time.time()
+        consecutive_json_errors = 0
+        
+        while self.heartbeat_running:
+            try:
+                # ★【关键修复】★ 使用recv()获取原始字节，然后手动解码
+                raw_message = self.heartbeat_receiver.recv(flags=zmq.NOBLOCK)
+                
+                # ★【鲁棒性】★ 检查空消息
+                if not raw_message or len(raw_message) == 0:
+                    time.sleep(0.001)  # 1ms极短休眠
+                    continue
+
+                try:
+                    # ★【关键修复】★ 手动解码并解析JSON，完全控制异常
+                    message_str = raw_message.decode('utf-8', errors='replace')
+                    ping_data = json.loads(message_str)
+                    
+                    # 重置JSON错误计数
+                    consecutive_json_errors = 0
+                    
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                    consecutive_json_errors += 1
+                    if consecutive_json_errors <= 5:  # 只记录前5次
+                        print(f"⚠️  HEARTBEAT JSON ERROR #{consecutive_json_errors}: {e}")
+                    
+                    # ★【关键】★ JSON错误不影响心跳，直接继续
+                    time.sleep(0.001)
+                    continue
+                
+                # ★【关键逻辑】★ 处理有效的PING消息
+                if ping_data.get("type") == "PING":
+                    current_time = time.time()
+                    
+                    # ★【立即响应】★ 最快速度回复PONG，避免任何可能的延迟
+                    self._send_immediate_pong(ping_data, current_time)
+                    
+                    # 重置失败计数
+                    heartbeat_failures = 0
+                    last_heartbeat_time = current_time
+                    
+            except zmq.Again:
+                # ★【超时检查】★ 检查心跳超时
+                current_time = time.time()
+                silence_duration = current_time - last_heartbeat_time
+                
+                if silence_duration > 10:  # 10秒无心跳
+                    heartbeat_failures += 1
+                    if heartbeat_failures <= 3:  # 只记录前3次
+                        print(f"⚠️  HEARTBEAT TIMEOUT #{heartbeat_failures}: No valid PING for {silence_duration:.1f}s")
+                    last_heartbeat_time = current_time
+                
+                # ★【极短休眠】★ 1ms休眠，确保最高响应性
+                time.sleep(0.001)
+                continue
+                
+            except Exception as e:
+                # ★【异常兜底】★ 任何其他异常都不能影响心跳
+                print(f"❌ HEARTBEAT THREAD ERROR: {e}")
+                time.sleep(0.01)
+        
+        self.logger.info("🫀 Dedicated heartbeat thread finished")
+    
+    def _send_immediate_pong(self, ping_data, current_time):
+        """★【极速响应】★ 立即发送PONG，零延迟"""
+        try:
+            # 构造简单的PONG响应
+            pong_response = {
+                "type": "PONG",
+                "timestamp": current_time,
+                "sequence": ping_data.get("sequence", 0),
+                "supervisor_status": "alive"
+            }
             
+            # ★【关键】★ 使用独立心跳sender，绝不与业务通道争抢
+            self.heartbeat_sender.send_string(json.dumps(pong_response), zmq.NOBLOCK)
+            
+            # ★【可选统计】★ 非阻塞统计更新
+            try:
+                if self.stats_lock.acquire(blocking=False):
+                    self.stats['heartbeat_sent'] += 1
+                    self.stats['heartbeat_received'] += 1
+                    self.stats_lock.release()
+            except:
+                pass  # 统计失败不影响心跳
+                
+        except Exception as e:
+            # ★【兜底】★ PONG发送失败也不能影响心跳接收
+            print(f"⚠️  PONG SEND ERROR: {e}")
+    
     def _set_thread_priority_high(self):
         """跨平台设置线程高优先级"""
         try:
@@ -682,7 +781,7 @@ class PythonSupervisor:
                 import ctypes
                 ctypes.windll.kernel32.SetThreadPriority(
                     ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_ABOVE_NORMAL
-                self.logger.debug("Windows thread priority set to high")
+                print("🚀 Windows heartbeat thread priority set to HIGH")
             elif system == "linux":
                 # Linux平台 (包括ARM设备)
                 try:
@@ -690,116 +789,31 @@ class PythonSupervisor:
                     libc = ctypes.CDLL("libc.so.6")
                     # 设置nice值为-10 (较高优先级)
                     libc.setpriority(0, 0, -10)  # PRIO_PROCESS, 当前进程, nice值
-                    self.logger.debug("Linux thread priority set to high (nice -10)")
+                    print("🚀 Linux heartbeat thread priority set to HIGH (nice -10)")
                 except Exception as e:
                     # 尝试通过os.nice设置进程优先级
                     try:
                         current_nice = os.nice(0)
                         if current_nice > -10:
                             os.nice(-10 - current_nice)
-                        self.logger.debug(f"Linux process nice set from {current_nice} to {os.nice(0)}")
+                        print(f"🚀 Linux process nice set from {current_nice} to {os.nice(0)}")
                     except Exception as e2:
-                        self.logger.warning(f"Failed to set Linux priority: {e}, {e2}")
+                        print(f"⚠️ Failed to set Linux priority: {e}, {e2}")
             elif system == "darwin":
                 # macOS平台
                 try:
                     import ctypes
                     libc = ctypes.CDLL("/usr/lib/libc.dylib")
                     libc.setpriority(0, 0, -10)  # 设置较高优先级
-                    self.logger.debug("macOS thread priority set to high")
+                    print("🚀 macOS heartbeat thread priority set to HIGH")
                 except Exception as e:
-                    self.logger.warning(f"Failed to set macOS priority: {e}")
+                    print(f"⚠️ Failed to set macOS priority: {e}")
             else:
-                self.logger.warning(f"Unknown platform {system}, skipping priority setting")
+                print(f"⚠️ Unknown platform {system}, skipping priority setting")
                 
         except Exception as e:
-            self.logger.warning(f"Failed to set thread priority: {e}")
+            print(f"⚠️ Failed to set heartbeat thread priority: {e}")
             # 继续执行，不因为优先级设置失败而中断
-            
-        heartbeat_failures = 0
-        last_heartbeat_time = time.time()
-        
-        while self.heartbeat_running:
-            try:
-                # ★【紧急修复】★ 更短的polling间隔，避免心跳饥饿
-                message = self.heartbeat_receiver.recv_string(zmq.NOBLOCK)
-                
-                # ★【增强鲁棒性】★ 检查空消息
-                if not message or not message.strip():
-                    print("⚠️  HEARTBEAT WARNING: Received empty message, ignoring")
-                    continue
-                    
-                ping_data = json.loads(message)
-                
-                # ★【关键修复】★ C++端发送的是大写的"PING"而不是小写的"ping"
-                if ping_data.get("type") == "PING":
-                    current_time = time.time()
-                    
-                    # ★【紧急修复】★ 原子化统计更新，避免锁竞争
-                    try:
-                        with self.stats_lock:
-                            self.stats['heartbeat_received'] += 1
-                    except:
-                        pass  # 如果锁竞争激烈，跳过统计，优先处理心跳
-                    
-                    # ★【紧急修复】★ 直接响应，减少中间调用
-                    self._handle_ping_immediate(ping_data, current_time)
-                    
-                    # 重置失败计数
-                    heartbeat_failures = 0
-                    last_heartbeat_time = current_time
-                    
-            except zmq.Again:
-                # ★【紧急修复】★ 检查心跳超时
-                current_time = time.time()
-                if current_time - last_heartbeat_time > 10:  # 10秒无心跳
-                    heartbeat_failures += 1
-                    if heartbeat_failures <= 3:  # 只记录前3次
-                        print(f"⚠️  HEARTBEAT WARNING: No PING for {current_time - last_heartbeat_time:.1f}s (failure #{heartbeat_failures})")
-                    last_heartbeat_time = current_time
-                
-                # ★【紧急修复】★ 极短的睡眠时间，确保高响应性
-                time.sleep(0.01)  # 10ms而不是100ms
-                continue
-                
-            except (json.JSONDecodeError, ValueError) as e:
-                # ★【鲁棒性增强】★ 捕获JSON解析错误和值错误，避免心跳线程崩溃
-                print(f"⚠️  HEARTBEAT WARNING: Invalid JSON message: {e}")
-                time.sleep(0.05)
-                continue
-                
-            except Exception as e:
-                # ★【紧急修复】★ 直接打印而不是使用logger，避免日志锁竞争
-                print(f"❌ HEARTBEAT ERROR: {e}")
-                time.sleep(0.05)
-        
-        self.logger.info("Heartbeat loop stopped")
-        
-    # ★【紧急修复】★ 立即心跳响应方法，避免锁竞争和复杂处理
-    def _handle_ping_immediate(self, ping_data, current_time):
-        """立即处理PING消息，最小化延迟"""
-        try:
-            # 构造简单的PONG响应
-            pong_response = {
-                "type": "PONG",
-                "timestamp": current_time,
-                "sequence": ping_data.get("sequence", 0),
-                "supervisor_status": "running"
-            }
-            
-            # ★【关键】★ 使用独立心跳sender，避免队列阻塞
-            self.heartbeat_sender.send_string(json.dumps(pong_response), zmq.NOBLOCK)
-            
-            # ★【紧急修复】★ 原子化统计更新，如果锁竞争就跳过
-            try:
-                with self.stats_lock:
-                    self.stats['heartbeat_sent'] += 1
-            except:
-                pass  # 锁竞争时跳过统计，优先响应心跳
-                
-        except Exception as e:
-            # ★【紧急修复】★ 直接打印，避免logger锁竞争
-            print(f"❌ IMMEDIATE PONG ERROR: {e}")
 
 def parse_arguments():
     """解析命令行参数"""

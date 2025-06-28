@@ -112,7 +112,6 @@ int ConfigManager::get_heartbeat_timeout() const {
     return current_config_.ipc.heartbeat_timeout;
 }
 
-// ★【关键修复】★ HWM配置获取方法实现
 int ConfigManager::get_packet_hwm() const {
     std::lock_guard<std::mutex> lock(config_mutex_);
     return current_config_.ipc.packet_hwm;

@@ -6,14 +6,19 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <chrono>
+#include <mutex>
+#include <algorithm>
 
 PacketSniffer::PacketSniffer(const std::string& interface, IPCManager* ipc)
     : interface_(interface), handle_(nullptr), ipc_manager_(ipc), 
-      running_(false), packets_captured_(0), packets_dropped_(0) {
+      running_(false), packets_captured_(0), packets_dropped_(0), packets_throttled_(0),
+      token_bucket_(100), last_refill_time_(std::chrono::steady_clock::now()) {  // ★【流量控制】★ 初始化令牌桶
     
     // ★【新增】★ 初始化PacketInfo对象池（预分配1000个对象，最大5000个）
     packet_info_pool_ = std::make_unique<PacketInfoPool>(1000, 5000);
     std::cout << "[Sniffer] Initialized PacketInfo object pool (1000 initial, 5000 max)" << std::endl;
+    std::cout << "[Sniffer] ★【流量控制】★ Token bucket initialized: " << max_tokens_ << " max tokens, " << refill_rate_ << " tokens/sec" << std::endl;
 }
 
 PacketSniffer::~PacketSniffer() {
@@ -127,6 +132,16 @@ void PacketSniffer::packet_handler(u_char* user, const struct pcap_pkthdr* heade
 
 void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_char* packet) {
     packets_captured_++;
+    
+    // ★【流量控制】★ 尝试获取令牌，如果没有令牌则丢弃包
+    if (!try_acquire_token()) {
+        packets_throttled_++;
+        // 每1000个被限流的包输出一次警告
+        if (packets_throttled_ % 1000 == 0) {
+            std::cout << "[Sniffer] ⚠️ Traffic throttled: " << packets_throttled_ << " packets dropped due to rate limiting" << std::endl;
+        }
+        return;
+    }
     
     // ★【优化】★ 使用对象池分配PacketInfo，避免频繁内存分配
     auto pkt_info = packet_info_pool_->acquire();
@@ -265,5 +280,43 @@ void PacketSniffer::print_pool_stats() const {
                   << "  Pool Hits: " << stats.pool_hits << std::endl
                   << "  Pool Misses: " << stats.pool_misses << std::endl
                   << "  Hit Ratio: " << (stats.hit_ratio * 100) << "%" << std::endl;
+    }
+}
+
+// ★【流量控制】★ 令牌桶实现
+bool PacketSniffer::try_acquire_token() {
+    std::lock_guard<std::mutex> lock(bucket_mutex_);
+    
+    // 补充令牌
+    refill_tokens();
+    
+    // 尝试获取令牌
+    if (token_bucket_.load() > 0) {
+        token_bucket_--;
+        return true;
+    }
+    
+    return false;  // 没有令牌，丢弃数据包
+}
+
+void PacketSniffer::refill_tokens() {
+    auto now = std::chrono::steady_clock::now();
+    auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_refill_time_).count();
+    
+    if (time_elapsed >= 100) {  // 每100ms补充一次令牌
+        int tokens_to_add = (refill_rate_ * time_elapsed) / 1000;  // 按时间比例补充
+        int current_tokens = token_bucket_.load();
+        int new_tokens = std::min(current_tokens + tokens_to_add, max_tokens_);
+        
+        token_bucket_.store(new_tokens);
+        last_refill_time_ = now;
+        
+        // 每5秒输出一次令牌桶状态（调试用）
+        static auto last_debug_time = now;
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_debug_time).count() >= 5) {
+            std::cout << "[Sniffer] 🪣 Token bucket: " << new_tokens << "/" << max_tokens_ 
+                      << " tokens, throttled: " << packets_throttled_ << " packets" << std::endl;
+            last_debug_time = now;
+        }
     }
 }
