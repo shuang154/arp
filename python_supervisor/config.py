@@ -23,6 +23,8 @@ class IPCConfig:
     packet_address: str = "ipc:///tmp/arp_spoofer_packets.ipc"
     command_address: str = "ipc:///tmp/arp_spoofer_commands.ipc"
     heartbeat_address: str = "ipc:///tmp/arp_spoofer_heartbeat.ipc"  # ★【新增】★ 心跳专用通道
+    heartbeat_interval: int = 5000    # 心跳间隔(ms)
+    heartbeat_timeout: int = 15000    # 心跳超时(ms)
 
 @dataclass
 class PerformanceConfig:
@@ -30,13 +32,28 @@ class PerformanceConfig:
     max_worker_threads: int = 8
     packet_buffer_size: int = 8388608  # 8MB
     command_timeout: int = 1000  # ms
+    # ★【新增】★ 对象池配置
+    object_pool_initial_size: int = 1000  # 对象池初始大小
+    object_pool_max_size: int = 5000     # 对象池最大大小
+
+@dataclass
+class CPUAffinityConfig:
+    """CPU亲和性配置"""
+    enable_cpu_binding: bool = True       # 启用CPU绑定
+    sniffer_cpu: int = 1                 # 数据包嗅探线程CPU
+    ipc_cpu: int = 2                     # IPC处理线程CPU
+    main_cpu: int = 0                    # 主线程CPU
+    auto_detect_cores: bool = True       # 自动检测CPU核心数
 
 @dataclass
 class AttackConfig:
     """攻击策略配置"""
     stealth_mode: bool = False
     attack_timeout: int = 45  # seconds
-    max_concurrent_attacks: int = 20
+    # ★【分离】★ Scout和Attack的并发限制
+    max_scout_attacks: int = 100          # Scout侦察最大并发数
+    max_active_attacks: int = 40          # Attack攻击最大并发数
+    max_concurrent_attacks: int = 40      # 旧配置(向后兼容，已废弃)
     cooldown_time: int = 3600  # seconds
     
     # ★【新增】★ 分级递进式攻击策略
@@ -46,9 +63,14 @@ class AttackConfig:
 @dataclass
 class AttackStrategyConfig:
     """攻击策略详细配置"""
-    scouting_duration: int = 300      # 侦察窗口持续时间（秒）
-    full_attack_duration: int = 1800  # 全面攻击持续时间（秒）
-    high_value_ports: List[int] = field(default_factory=lambda: [801, 443])  # 高价值端口
+    scouting_duration: int = 60           # 侦察窗口持续时间（秒）
+    full_attack_duration: int = 60        # 全面攻击持续时间（秒）
+    high_value_ports: List[int] = field(default_factory=lambda: [801])  # 高价值端口
+    # ★【新增】★ 升级策略配置
+    auto_upgrade_on_high_value: bool = True      # 访问801端口自动升级为Attack
+    upgrade_priority: str = "immediate"          # 升级优先级: immediate/normal
+    scout_cleanup_interval: int = 30             # Scout清理间隔(秒)
+    attack_cleanup_interval: int = 60            # Attack清理间隔(秒)
     immediate_restore_on_success: bool = True
 
 @dataclass
@@ -86,6 +108,26 @@ class SecurityConfig:
     require_root: bool = True
     bind_to_cpu: bool = True
     memory_limit: int = 536870912  # 512MB
+    # ★【新增】★ 配置热重载
+    enable_config_reload: bool = True    # 启用配置热重载
+    config_check_interval: int = 10      # 配置文件检查间隔(秒)
+
+@dataclass
+class GracefulShutdownConfig:
+    """优雅停机配置"""
+    enable: bool = True                   # 启用优雅停机
+    phase_timeout: int = 5000             # 每个阶段超时时间(ms)
+    total_timeout: int = 30000            # 总超时时间(ms)
+    save_state_on_exit: bool = True       # 退出时保存状态
+
+@dataclass
+class MonitoringConfig:
+    """性能监控配置"""
+    enable_performance_monitoring: bool = True  # 启用性能监控
+    stats_report_interval: int = 30             # 统计信息报告间隔(秒)
+    system_health_check: bool = True            # 系统健康检查
+    memory_usage_threshold: int = 80            # 内存使用率告警阈值(%)
+    cpu_usage_threshold: int = 90               # CPU使用率告警阈值(%)
 
 class Config:
     """主配置类"""
@@ -94,11 +136,14 @@ class Config:
         self.network = NetworkConfig()
         self.ipc = IPCConfig()
         self.performance = PerformanceConfig()
+        self.cpu_affinity = CPUAffinityConfig()
         self.attack = AttackConfig()
         self.cache = CacheConfig()
         self.logging = LoggingConfig()
         self.web_api = WebAPIConfig()
         self.security = SecurityConfig()
+        self.graceful_shutdown = GracefulShutdownConfig()
+        self.monitoring = MonitoringConfig()
         
         # ★【新增】★ 高价值事件触发器列表
         self.high_value_triggers: List[HighValueEventTrigger] = []
@@ -131,6 +176,44 @@ class Config:
     def heartbeat_ipc_address(self, value: str):
         """设置心跳IPC地址"""
         self.ipc.heartbeat_address = value
+    
+    # ★【新增】★ Scout和Attack分离的便捷属性
+    @property
+    def max_scout_attacks(self) -> int:
+        return self.attack.max_scout_attacks
+    
+    @max_scout_attacks.setter
+    def max_scout_attacks(self, value: int):
+        if value < 1:
+            raise ValueError("Scout侦察并发数必须大于0")
+        self.attack.max_scout_attacks = value
+    
+    @property
+    def max_active_attacks(self) -> int:
+        return self.attack.max_active_attacks
+    
+    @max_active_attacks.setter
+    def max_active_attacks(self, value: int):
+        if value < 1:
+            raise ValueError("Attack攻击并发数必须大于0")
+        self.attack.max_active_attacks = value
+    
+    # ★【新增】★ 攻击策略便捷属性
+    @property
+    def scouting_duration(self) -> int:
+        return self.attack.strategy.scouting_duration
+    
+    @property
+    def full_attack_duration(self) -> int:
+        return self.attack.strategy.full_attack_duration
+    
+    @property
+    def high_value_ports(self) -> List[int]:
+        return self.attack.strategy.high_value_ports
+    
+    @property
+    def auto_upgrade_on_high_value(self) -> bool:
+        return self.attack.strategy.auto_upgrade_on_high_value
     
     @property
     def max_worker_threads(self) -> int:
@@ -212,27 +295,51 @@ class Config:
                 ipc_config = yaml_data['ipc']
                 config.ipc.packet_address = ipc_config.get('packet_address', config.ipc.packet_address)
                 config.ipc.command_address = ipc_config.get('command_address', config.ipc.command_address)
+                # ★【新增】★ 心跳配置解析
+                config.ipc.heartbeat_address = ipc_config.get('heartbeat_address', config.ipc.heartbeat_address)
+                config.ipc.heartbeat_interval = ipc_config.get('heartbeat_interval', config.ipc.heartbeat_interval)
+                config.ipc.heartbeat_timeout = ipc_config.get('heartbeat_timeout', config.ipc.heartbeat_timeout)
             
             if 'performance' in yaml_data:
                 perf_config = yaml_data['performance']
                 config.performance.max_worker_threads = perf_config.get('max_worker_threads', config.performance.max_worker_threads)
                 config.performance.packet_buffer_size = perf_config.get('packet_buffer_size', config.performance.packet_buffer_size)
                 config.performance.command_timeout = perf_config.get('command_timeout', config.performance.command_timeout)
+                # ★【新增】★ 对象池配置解析
+                config.performance.object_pool_initial_size = perf_config.get('object_pool_initial_size', config.performance.object_pool_initial_size)
+                config.performance.object_pool_max_size = perf_config.get('object_pool_max_size', config.performance.object_pool_max_size)
+            
+            # ★【新增】★ CPU亲和性配置解析
+            if 'cpu_affinity' in yaml_data:
+                cpu_config = yaml_data['cpu_affinity']
+                config.cpu_affinity.enable_cpu_binding = cpu_config.get('enable_cpu_binding', config.cpu_affinity.enable_cpu_binding)
+                config.cpu_affinity.sniffer_cpu = cpu_config.get('sniffer_cpu', config.cpu_affinity.sniffer_cpu)
+                config.cpu_affinity.ipc_cpu = cpu_config.get('ipc_cpu', config.cpu_affinity.ipc_cpu)
+                config.cpu_affinity.main_cpu = cpu_config.get('main_cpu', config.cpu_affinity.main_cpu)
+                config.cpu_affinity.auto_detect_cores = cpu_config.get('auto_detect_cores', config.cpu_affinity.auto_detect_cores)
             
             if 'attack' in yaml_data:
                 attack_config = yaml_data['attack']
                 config.attack.stealth_mode = attack_config.get('stealth_mode', config.attack.stealth_mode)
                 config.attack.attack_timeout = attack_config.get('attack_timeout', config.attack.attack_timeout)
+                # ★【分离】★ Scout和Attack并发限制解析
+                config.attack.max_scout_attacks = attack_config.get('max_scout_attacks', config.attack.max_scout_attacks)
+                config.attack.max_active_attacks = attack_config.get('max_active_attacks', config.attack.max_active_attacks)
                 config.attack.max_concurrent_attacks = attack_config.get('max_concurrent_attacks', config.attack.max_concurrent_attacks)
                 config.attack.cooldown_time = attack_config.get('cooldown_time', config.attack.cooldown_time)
                 config.attack.immediate_restore_on_success = attack_config.get('immediate_restore_on_success', config.attack.immediate_restore_on_success)
                 
-                # ★【新增】★ 加载策略配置
+                # ★【增强】★ 加载策略配置
                 if 'strategy' in attack_config:
                     strategy_config = attack_config['strategy']
                     config.attack.strategy.scouting_duration = strategy_config.get('scouting_duration', config.attack.strategy.scouting_duration)
                     config.attack.strategy.full_attack_duration = strategy_config.get('full_attack_duration', config.attack.strategy.full_attack_duration)
                     config.attack.strategy.high_value_ports = strategy_config.get('high_value_ports', config.attack.strategy.high_value_ports)
+                    # ★【新增】★ 升级策略配置解析
+                    config.attack.strategy.auto_upgrade_on_high_value = strategy_config.get('auto_upgrade_on_high_value', config.attack.strategy.auto_upgrade_on_high_value)
+                    config.attack.strategy.upgrade_priority = strategy_config.get('upgrade_priority', config.attack.strategy.upgrade_priority)
+                    config.attack.strategy.scout_cleanup_interval = strategy_config.get('scout_cleanup_interval', config.attack.strategy.scout_cleanup_interval)
+                    config.attack.strategy.attack_cleanup_interval = strategy_config.get('attack_cleanup_interval', config.attack.strategy.attack_cleanup_interval)
                     config.attack.strategy.immediate_restore_on_success = strategy_config.get('immediate_restore_on_success', config.attack.strategy.immediate_restore_on_success)
             
             if 'cache' in yaml_data:
@@ -259,6 +366,26 @@ class Config:
                 config.security.require_root = sec_config.get('require_root', config.security.require_root)
                 config.security.bind_to_cpu = sec_config.get('bind_to_cpu', config.security.bind_to_cpu)
                 config.security.memory_limit = sec_config.get('memory_limit', config.security.memory_limit)
+                # ★【新增】★ 配置热重载解析
+                config.security.enable_config_reload = sec_config.get('enable_config_reload', config.security.enable_config_reload)
+                config.security.config_check_interval = sec_config.get('config_check_interval', config.security.config_check_interval)
+            
+            # ★【新增】★ 优雅停机配置解析
+            if 'graceful_shutdown' in yaml_data:
+                shutdown_config = yaml_data['graceful_shutdown']
+                config.graceful_shutdown.enable = shutdown_config.get('enable', config.graceful_shutdown.enable)
+                config.graceful_shutdown.phase_timeout = shutdown_config.get('phase_timeout', config.graceful_shutdown.phase_timeout)
+                config.graceful_shutdown.total_timeout = shutdown_config.get('total_timeout', config.graceful_shutdown.total_timeout)
+                config.graceful_shutdown.save_state_on_exit = shutdown_config.get('save_state_on_exit', config.graceful_shutdown.save_state_on_exit)
+            
+            # ★【新增】★ 性能监控配置解析
+            if 'monitoring' in yaml_data:
+                monitor_config = yaml_data['monitoring']
+                config.monitoring.enable_performance_monitoring = monitor_config.get('enable_performance_monitoring', config.monitoring.enable_performance_monitoring)
+                config.monitoring.stats_report_interval = monitor_config.get('stats_report_interval', config.monitoring.stats_report_interval)
+                config.monitoring.system_health_check = monitor_config.get('system_health_check', config.monitoring.system_health_check)
+                config.monitoring.memory_usage_threshold = monitor_config.get('memory_usage_threshold', config.monitoring.memory_usage_threshold)
+                config.monitoring.cpu_usage_threshold = monitor_config.get('cpu_usage_threshold', config.monitoring.cpu_usage_threshold)
             
             return config
             

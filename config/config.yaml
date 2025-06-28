@@ -12,6 +12,8 @@ network:
 ipc:
   packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
   command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
+  # ★【新增】★ 独立心跳通道
+  heartbeat_address: "ipc:///tmp/arp_spoofer_heartbeat.ipc"
   # ★【新增】★ 心跳配置
   heartbeat_interval: 5000       # 心跳间隔(ms)
   heartbeat_timeout: 15000       # 心跳超时(ms)
@@ -37,15 +39,23 @@ cpu_affinity:
 attack:
   stealth_mode: false            # 隐蔽模式
   attack_timeout: 45             # 攻击超时时间(秒)
-  max_concurrent_attacks: 40     # 最大并发攻击数 (香橙派优化)
+  # ★【修改】★ 分离Scout和Attack的并发限制
+  max_scout_attacks: 100         # Scout侦察最大并发数
+  max_active_attacks: 40         # Attack攻击最大并发数
+  #max_concurrent_attacks: 40     # 旧配置(向后兼容，已废弃)
   cooldown_time: 3600           # 冷却时间(秒)
   
-  # ★【新增】★ 分级递进式攻击策略
+  # ★【增强】★ 分级递进式攻击策略
   strategy:
-    scouting_duration: 60       # 侦察窗口持续时间（秒）- 1分钟
-    full_attack_duration: 60   # 升级为全面攻击后的持续时间（秒）- 1分钟
-    high_value_ports: [801] # 高价值端口列表
-    immediate_restore_on_success: true  # 捕获凭据后立即恢复网络
+    scouting_duration: 60       # Scout侦察持续时间（秒）- 1分钟
+    full_attack_duration: 60   # Attack攻击持续时间（秒）- 1分钟
+    high_value_ports: [801]     # 触发升级的高价值端口
+    # ★【新增】★ 升级策略配置
+    auto_upgrade_on_high_value: true     # 访问801端口自动升级为Attack
+    upgrade_priority: "immediate"        # 升级优先级: immediate/normal
+    scout_cleanup_interval: 30           # Scout清理间隔(秒)
+    attack_cleanup_interval: 60          # Attack清理间隔(秒)
+    immediate_restore_on_success: true   # 捕获凭据后立即恢复网络
 
 # 缓存配置
 cache:
