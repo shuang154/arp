@@ -842,6 +842,33 @@ class PythonSupervisor:
             print(f"⚠️ Failed to set heartbeat thread priority: {e}")
             # 继续执行，不因为优先级设置失败而中断
 
+    def _safe_stats_get(self, key: str, default=0):
+        """安全地获取统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                return self.stats.get(key, default)
+        except Exception as e:
+            self.logger.warning(f"Error accessing stats key '{key}': {e}")
+            return default
+    
+    def _safe_stats_increment(self, key: str, increment=1):
+        """安全地增加统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                if key not in self.stats:
+                    self.stats[key] = 0
+                self.stats[key] += increment
+        except Exception as e:
+            self.logger.warning(f"Error incrementing stats key '{key}': {e}")
+    
+    def _safe_stats_set(self, key: str, value):
+        """安全地设置统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                self.stats[key] = value
+        except Exception as e:
+            self.logger.warning(f"Error setting stats key '{key}': {e}")
+    
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")
