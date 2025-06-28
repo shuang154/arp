@@ -86,7 +86,7 @@ void IPCManager::heartbeat_thread_func() {
     while (!shutdown_flag_) {
         auto now = std::chrono::steady_clock::now();
 
-        // 1. 发送 PING (JSON格式) - ★【修复】★ 深拷贝+阻塞发送+成功才更新时间戳
+        // 1. 发送 PING (JSON格式) - ★【修复】★ 深拷贝+dontwait非阻塞+统计丢包
         if (now - last_ping_time > ping_interval) {
             // ★【修复】★ 构建标准JSON格式的PING消息
             const std::string ping_json = R"({"type":"PING","timestamp":)" + 
@@ -98,21 +98,34 @@ void IPCManager::heartbeat_thread_func() {
                 // ★【关键修复】★ 使用最可靠的深拷贝方式
                 zmq::message_t ping_msg(ping_json.begin(), ping_json.end());
                 
-                // ★【关键修复】★ 使用阻塞发送，只有成功才更新时间戳和计数器
-                if (heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::none)) {
-                    // ★【关键】★ 只有发送成功后才更新时间戳和计数器
+                // ★【关键修复】★ 使用dontwait非阻塞发送，丢包不重试，避免阻塞
+                auto result = heartbeat_ping_sender_->send(ping_msg, zmq::send_flags::dontwait);
+                if (result.has_value() && result.value() > 0) {
+                    // ★【成功】★ 发送成功，更新时间戳和计数器
                     last_ping_time = std::chrono::steady_clock::now();
                     pings_sent_++;
                     std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // ★【启用调试】★
+                } else {
+                    // ★【丢包统计】★ 非阻塞发送失败（队列满），统计丢包但不阻塞
+                    static std::atomic<size_t> ping_drops{0};
+                    ping_drops++;
+                    std::cout << "[Heartbeat] PING dropped (queue full), drops: " << ping_drops.load() << std::endl;
+                    // ★【关键】★ 仍更新时间戳，避免下次立即重试造成连续丢包
+                    last_ping_time = std::chrono::steady_clock::now();
                 }
             } catch (const zmq::error_t& e) {
-                // ★【关键修复】★ 捕获所有网络错误，不更新时间戳
+                // ★【丢包统计】★ 捕获所有网络错误，统计但不阻塞
+                static std::atomic<size_t> ping_errors{0};
+                ping_errors++;
                 if (e.num() == EHOSTUNREACH) {
-                    std::cerr << "[Heartbeat] Network unreachable (EHOSTUNREACH), retrying..." << std::endl;
-                } else if (e.num() != ETERM && e.num() != EAGAIN) {
-                    std::cerr << "[Heartbeat] Failed to send PING: " << e.what() << " (errno: " << e.num() << ")" << std::endl;
+                    std::cout << "[Heartbeat] Network unreachable, errors: " << ping_errors.load() << std::endl;
+                } else if (e.num() == EAGAIN) {
+                    std::cout << "[Heartbeat] Queue full (EAGAIN), errors: " << ping_errors.load() << std::endl;
+                } else if (e.num() != ETERM) {
+                    std::cerr << "[Heartbeat] PING error: " << e.what() << " (errno: " << e.num() << "), errors: " << ping_errors.load() << std::endl;
                 }
-                // ★【关键】★ 发送失败时不更新last_ping_time，这样下次循环会立即重试
+                // ★【关键】★ 发送失败时仍更新时间戳，避免心跳线程阻塞
+                last_ping_time = std::chrono::steady_clock::now();
             }
         }
 

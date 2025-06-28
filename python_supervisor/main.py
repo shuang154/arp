@@ -21,7 +21,7 @@ import sys
 import hashlib  # ★【新增】★ 用于计算数据包指纹
 import queue     # ★【新增】★ 用于批量命令处理
 import platform  # ★【新增】★ 用于平台检测
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor  # ★【修复】★ 混合使用线程池和进程池
 from dataclasses import dataclass
 from typing import Optional, Dict, Set
 from datetime import datetime, timedelta
@@ -83,9 +83,15 @@ class PythonSupervisor:
         self.heartbeat_thread = None
         self.heartbeat_running = False
         
+        # ★【关键修复】★ 主业务用线程池(解析数据包等IO密集)，CPU密集任务用进程池避免GIL
         self.thread_pool = ThreadPoolExecutor(
-            max_workers=max_threads,
+            max_workers=max_threads // 2,  # 减半线程数为进程池让路
             thread_name_prefix="PacketWorker"
+        )
+        
+        # ★【关键修复】★ CPU密集型任务专用进程池，避免GIL饥饿导致心跳卡死
+        self.cpu_process_pool = ProcessPoolExecutor(
+            max_workers=max(1, max_threads // 4),  # 少量进程用于CPU密集计算
         )
         
         # ★【增强】★ 统计信息，添加更多监控指标
@@ -216,20 +222,17 @@ class PythonSupervisor:
                 try:
                     # 1. 接收原始二进制数据
                     raw_data = self.packet_receiver.recv(zmq.NOBLOCK)
-                    with self.stats_lock:
-                        self.stats['packets_received'] += 1
+                    self._safe_stats_increment('packets_received')
                     
                     # ★★★【关键性能优化】★★★ 主线程只负责快速接收和分发
                     # 2. 最轻量的预检查 - 只检查数据长度
                     if len(raw_data) < 10:  # 过小的数据直接丢弃
-                        with self.stats_lock:
-                            self.stats['packets_dropped'] += 1
+                        self._safe_stats_increment('packets_dropped')
                         continue
                     
                     # ★【负载控制】★ 检查队列深度，防止过载
                     if self.command_queue.qsize() > 800:  # 过载阈值
-                        with self.stats_lock:
-                            self.stats['packets_dropped'] += 1
+                        self._safe_stats_increment('packets_dropped')
                         self.logger.warning("System overloaded, dropping packet")
                         continue
                     
@@ -270,8 +273,7 @@ class PythonSupervisor:
                     del self.recent_packets_cache[key]
                 
                 if packet_hash in self.recent_packets_cache:
-                    with self.stats_lock:
-                        self.stats['packets_dropped'] += 1
+                    self._safe_stats_increment('packets_dropped')
                     return  # 重复数据包，直接丢弃
                 
                 # 添加到去重缓存
@@ -282,12 +284,10 @@ class PythonSupervisor:
             
         except UnicodeDecodeError:
             # 二进制数据解码失败
-            with self.stats_lock:
-                self.stats['packets_dropped'] += 1
+            self._safe_stats_increment('packets_dropped')
             self.logger.debug("Failed to decode packet data")
         except Exception as e:
-            with self.stats_lock:
-                self.stats['packets_dropped'] += 1
+            self._safe_stats_increment('packets_dropped')
             self.logger.error(f"Error in packet processing with dedup: {e}")
     
     def _process_packet(self, packet_data: str):
@@ -295,8 +295,7 @@ class PythonSupervisor:
         try:
             # 解析数据包
             packet_info = json.loads(packet_data)
-            with self.stats_lock:
-                self.stats['packets_processed'] += 1
+            self._safe_stats_increment('packets_processed')
             
             # 分析数据包
             analysis_result = self.packet_analyzer.analyze(packet_info)
@@ -313,12 +312,10 @@ class PythonSupervisor:
                         self._execute_decision(decision)
                     
         except json.JSONDecodeError:
-            with self.stats_lock:
-                self.stats['packets_dropped'] += 1
+            self._safe_stats_increment('packets_dropped')
             self.logger.debug(f"Failed to decode JSON: {packet_data[:100]}")
         except Exception as e:
-            with self.stats_lock:
-                self.stats['packets_dropped'] += 1
+            self._safe_stats_increment('packets_dropped')
             self.logger.error(f"Error processing packet: {e}")
             
     # ★【新增】★ 批量命令处理方法
@@ -327,18 +324,15 @@ class PythonSupervisor:
         try:
             # 负载控制：如果队列太满，丢弃新命令
             if self.command_queue.full():
-                with self.stats_lock:
-                    self.stats['packets_dropped'] += 1
+                self._safe_stats_increment('packets_dropped')
                 self.logger.warning("Command queue full, dropping command")
                 return
             
             self.command_queue.put(command, block=False)
-            with self.stats_lock:
-                self.stats['commands_queued'] += 1
+            self._safe_stats_increment('commands_queued')
                 
         except queue.Full:
-            with self.stats_lock:
-                self.stats['packets_dropped'] += 1
+            self._safe_stats_increment('packets_dropped')
             self.logger.warning("Command queue full, command dropped")
             
     def _start_command_processor(self):
@@ -389,17 +383,14 @@ class PythonSupervisor:
                 command_json = json.dumps(command)
                 self.command_sender.send_string(command_json, zmq.NOBLOCK)
                 
-                with self.stats_lock:
-                    self.stats['commands_sent'] += 1
+                self._safe_stats_increment('commands_sent')
                     
         except zmq.Again:
             self.logger.warning(f"Batch command send timeout, {len(commands)} commands failed")
-            with self.stats_lock:
-                self.stats['packets_dropped'] += len(commands)
+            self._safe_stats_increment('packets_dropped', len(commands))
         except Exception as e:
             self.logger.error(f"Error sending command batch: {e}")
-            with self.stats_lock:
-                self.stats['packets_dropped'] += len(commands)
+            self._safe_stats_increment('packets_dropped', len(commands))
     
     # ★【优化】★ 独立心跳处理方法
     def _handle_ping(self, ping_data):
@@ -416,8 +407,7 @@ class PythonSupervisor:
             pong_json = json.dumps(pong_response)
             self.heartbeat_sender_dedicated.send_string(pong_json, zmq.NOBLOCK)
             
-            with self.stats_lock:
-                self.stats['heartbeat_sent'] += 1
+            self._safe_stats_increment('heartbeat_sent')
                 
             # ★【优化】★ 降低心跳日志频率，避免日志洪泛
             current_time = time.time()
@@ -561,8 +551,7 @@ class PythonSupervisor:
             # ★【关键修改】★ 使用队列而不是直接发送
             self._queue_command(command)
             
-            with self.stats_lock:
-                self.stats['attacks_launched'] += 1
+            self._safe_stats_increment('attacks_launched')
                 
         except Exception as e:
             self.logger.error(f"Error executing decision: {e}")
@@ -635,6 +624,7 @@ class PythonSupervisor:
         
         # 关闭线程池
         self.thread_pool.shutdown(wait=True)
+        self.cpu_process_pool.shutdown(wait=True)  # ★【新增】★ 关闭进程池
         
         # ★【新增】★ 清理独立心跳上下文
         if hasattr(self, 'heartbeat_context'):
@@ -699,7 +689,7 @@ class PythonSupervisor:
                     print(f"🔍 DEBUG: Raw frame #{ping_received}: {repr(raw_message[:100])}")
 
                 try:
-                    # ★【兼容性修复】★ 手动解码并处理两种格式：JSON 和简单字符串
+                    # ★【兼容性修复】★ 手动解码并处理两种格式：JSON 和 简单字符串
                     message_str = raw_message.decode('utf-8', errors='replace').strip()
                     
                     # 尝试解析为JSON格式
@@ -797,14 +787,9 @@ class PythonSupervisor:
                     else:
                         print(f"⚠️  PONG send error: {e}")
             
-            # ★【可选统计】★ 非阻塞统计更新
-            try:
-                if self.stats_lock.acquire(blocking=False):
-                    self.stats['heartbeat_sent'] += 1
-                    self.stats['heartbeat_received'] += 1
-                    self.stats_lock.release()
-            except:
-                pass  # 统计失败不影响心跳
+            # ★【可选统计】★ 使用安全的统计方法
+            self._safe_stats_increment('heartbeat_sent')
+            self._safe_stats_increment('heartbeat_received')
                 
         except Exception as e:
             # ★【兜底】★ PONG发送失败也不能影响心跳接收

@@ -1667,6 +1667,33 @@ class AttackCoordinator:
                 'attack_utilization': len(self.active_attacks) / self.max_active_attacks * 100
             }
     
+    def _safe_stats_get(self, key: str, default=0):
+        """安全地获取统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                return self.stats.get(key, default)
+        except Exception as e:
+            self.logger.warning(f"Error accessing stats key '{key}': {e}")
+            return default
+    
+    def _safe_stats_increment(self, key: str, increment=1):
+        """安全地增加统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                if key not in self.stats:
+                    self.stats[key] = 0
+                self.stats[key] += increment
+        except Exception as e:
+            self.logger.warning(f"Error incrementing stats key '{key}': {e}")
+    
+    def _safe_stats_set(self, key: str, value):
+        """安全地设置统计值，避免KeyError"""
+        try:
+            with self.stats_lock:
+                self.stats[key] = value
+        except Exception as e:
+            self.logger.warning(f"Error setting stats key '{key}': {e}")
+    
     def _save_credentials(self, source_ip: str, credentials: Dict[str, str], metadata: Dict):
         """保存捕获的凭据并触发立即撤离 - 真正原子性版本
         
@@ -1712,6 +1739,7 @@ class AttackCoordinator:
             self._processed_credentials.add(credential_key)
             
             # 在锁内执行实际保存操作，确保完全的原子性
+
             try:
                 # 执行实际保存
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -1987,121 +2015,3 @@ class AttackCoordinator:
             
             import threading
             threading.Thread(target=cleanup_restore_mark, daemon=True).start()
-
-    # ★【新增】★ 增强的状态统计方法
-    def get_session_stats(self) -> dict:
-        """获取会话统计信息 - 增强版"""
-        with self.active_scouts_lock:
-            active_scouts = len(self.active_scouts)
-        with self.active_attacks_lock:
-            active_attacks = len(self.active_attacks)
-        
-        scout_utilization = (active_scouts / self.max_scout_attacks) * 100 if self.max_scout_attacks > 0 else 0
-        attack_utilization = (active_attacks / self.max_active_attacks) * 100 if self.max_active_attacks > 0 else 0
-        
-        return {
-            'active_scouts': active_scouts,
-            'max_scout_attacks': self.max_scout_attacks,
-            'scout_utilization': scout_utilization,
-            'active_attacks': active_attacks,
-            'max_active_attacks': self.max_active_attacks,
-            'attack_utilization': attack_utilization,
-            'delayed_attacks': len(self.delayed_attacks)
-        }
-    
-    def get_concurrency_stats(self) -> dict:
-        """获取并发控制统计信息"""
-        # 令牌桶状态
-        token_status = self.concurrency_controller.get_status()
-        
-        # Scout发射器状态
-        scout_status = self.scout_launcher.get_status()
-        
-        # 处理中的目标数量
-        with self.processing_lock:
-            processing_targets = len(self.processing_targets)
-        
-        # 命令去重缓存大小
-        with self.command_lock:
-            command_cache_size = len(self.command_fingerprints)
-        
-        return {
-            'tokens_available': token_status['tokens'],
-            'max_tokens': token_status['max_concurrent'],
-            'token_refill_rate': token_status['refill_rate'],
-            'scout_active': scout_status['active_count'],
-            'scout_queue': scout_status['queue_count'],
-            'scout_launch_rate': scout_status['launch_rate'],
-            'processing_targets': processing_targets,
-            'command_cache_size': command_cache_size,
-            'delayed_attacks': len(self.delayed_attacks)
-        }
-
-    def _should_attack(self, target_ip: str, analysis_result) -> bool:
-        """判断是否应该攻击目标 - 简化版本"""
-        # 基本检查
-        if not target_ip or target_ip == "0.0.0.0":
-            return False
-        
-        # 检查是否在白名单
-        if hasattr(self.config, 'whitelist') and target_ip in self.config.whitelist:
-            return False
-        
-        # 检查是否已经在攻击
-        with self.active_scouts_lock:
-            if target_ip in self.active_scouts:
-                return False
-        
-        with self.active_attacks_lock:
-            if target_ip in self.active_attacks:
-                return False
-        
-        return True
-
-    def _load_concurrency_config(self):
-        """从配置文件加载并发控制参数"""
-        # ARM平台检测
-        is_arm = platform.machine().startswith(('arm', 'aarch'))
-        
-        # 从config.yaml读取或使用默认值
-        concurrency_config = getattr(self.config, 'concurrency_control', {})
-        
-        if is_arm:
-            # ARM平台保守配置
-            self.scout_max = concurrency_config.get('scout_max_arm', 30)
-            self.scout_launch_rate = concurrency_config.get('scout_launch_rate_arm', 4)
-            self.attack_max = concurrency_config.get('attack_max_arm', 15)
-            self.attack_refill_rate = concurrency_config.get('attack_refill_rate_arm', 2)
-            self.event_dedup_ttl = concurrency_config.get('event_dedup_ttl_arm', 5)
-            self.command_dedup_ttl = concurrency_config.get('command_dedup_ttl_arm', 3)
-            self.logger.info(f"🔧 ARM platform detected - Scout: {self.scout_max}@{self.scout_launch_rate}/s, Attack: {self.attack_max}@{self.attack_refill_rate}/s")
-        else:
-            # x86平台正常配置
-            self.scout_max = concurrency_config.get('scout_max_x86', 50)
-            self.scout_launch_rate = concurrency_config.get('scout_launch_rate_x86', 8)
-            self.attack_max = concurrency_config.get('attack_max_x86', 25)
-            self.attack_refill_rate = concurrency_config.get('attack_refill_rate_x86', 4)
-            self.event_dedup_ttl = concurrency_config.get('event_dedup_ttl_x86', 5)
-            self.command_dedup_ttl = concurrency_config.get('command_dedup_ttl_x86', 3)
-            self.logger.info(f"🖥️ x86 platform detected - Scout: {self.scout_max}@{self.scout_launch_rate}/s, Attack: {self.attack_max}@{self.attack_refill_rate}/s")
-
-    def _set_thread_priority_high(self):
-        """跨平台设置线程高优先级"""
-        try:
-            import os
-            
-            if os.name == 'nt':  # Windows
-                import ctypes
-                ctypes.windll.kernel32.SetThreadPriority(
-                    ctypes.windll.kernel32.GetCurrentThread(), 2)
-                self.logger.debug("✅ Thread priority set to high (Windows)")
-            else:  # Linux/Unix
-                try:
-                    import resource
-                    # 设置nice值降低（提高优先级）
-                    os.nice(-5)  # 需要root权限
-                    self.logger.debug("✅ Thread priority set to high (Linux)")
-                except PermissionError:
-                    self.logger.debug("⚠️ Need root permission to set thread priority (Linux)")
-        except Exception as e:
-            self.logger.debug(f"⚠️ Failed to set thread priority: {e}")
