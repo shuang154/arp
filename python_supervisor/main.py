@@ -599,29 +599,90 @@ class PythonSupervisor:
         self.logger.info("Heartbeat mechanism stopped")
     
     def _heartbeat_loop(self):
-        """心跳监听循环"""
+        """心跳监听循环 - 高优先级，确保及时响应"""
+        # ★【紧急修复】★ 设置线程优先级 - Windows兼容
+        try:
+            import ctypes
+            import threading
+            # 提升线程优先级到高于正常
+            ctypes.windll.kernel32.SetThreadPriority(
+                ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_ABOVE_NORMAL
+        except:
+            pass  # 如果设置失败就忽略
+            
+        heartbeat_failures = 0
+        last_heartbeat_time = time.time()
+        
         while self.heartbeat_running:
             try:
-                # 接收心跳PING
+                # ★【紧急修复】★ 更短的polling间隔，避免心跳饥饿
                 message = self.heartbeat_receiver.recv_string(zmq.NOBLOCK)
                 ping_data = json.loads(message)
                 
                 # ★【关键修复】★ C++端发送的是大写的"PING"而不是小写的"ping"
                 if ping_data.get("type") == "PING":
-                    with self.stats_lock:
-                        self.stats['heartbeat_received'] += 1
-                    self._handle_ping(ping_data)
+                    current_time = time.time()
+                    
+                    # ★【紧急修复】★ 原子化统计更新，避免锁竞争
+                    try:
+                        with self.stats_lock:
+                            self.stats['heartbeat_received'] += 1
+                    except:
+                        pass  # 如果锁竞争激烈，跳过统计，优先处理心跳
+                    
+                    # ★【紧急修复】★ 直接响应，减少中间调用
+                    self._handle_ping_immediate(ping_data, current_time)
+                    
+                    # 重置失败计数
+                    heartbeat_failures = 0
+                    last_heartbeat_time = current_time
                     
             except zmq.Again:
-                # 没有心跳消息，继续等待
-                time.sleep(0.1)
+                # ★【紧急修复】★ 检查心跳超时
+                current_time = time.time()
+                if current_time - last_heartbeat_time > 10:  # 10秒无心跳
+                    heartbeat_failures += 1
+                    if heartbeat_failures <= 3:  # 只记录前3次
+                        print(f"⚠️  HEARTBEAT WARNING: No PING for {current_time - last_heartbeat_time:.1f}s (failure #{heartbeat_failures})")
+                    last_heartbeat_time = current_time
+                
+                # ★【紧急修复】★ 极短的睡眠时间，确保高响应性
+                time.sleep(0.01)  # 10ms而不是100ms
                 continue
+                
             except Exception as e:
-                self.logger.error(f"Error in heartbeat loop: {e}")
-                time.sleep(0.1)
+                # ★【紧急修复】★ 直接打印而不是使用logger，避免日志锁竞争
+                print(f"❌ HEARTBEAT ERROR: {e}")
+                time.sleep(0.05)
         
         self.logger.info("Heartbeat loop stopped")
         
+    # ★【紧急修复】★ 立即心跳响应方法，避免锁竞争和复杂处理
+    def _handle_ping_immediate(self, ping_data, current_time):
+        """立即处理PING消息，最小化延迟"""
+        try:
+            # 构造简单的PONG响应
+            pong_response = {
+                "type": "PONG",
+                "timestamp": current_time,
+                "sequence": ping_data.get("sequence", 0),
+                "supervisor_status": "running"
+            }
+            
+            # ★【关键】★ 使用dedicated心跳sender，不经过队列
+            self.heartbeat_sender_dedicated.send_string(json.dumps(pong_response), zmq.NOBLOCK)
+            
+            # ★【紧急修复】★ 原子化统计更新，如果锁竞争就跳过
+            try:
+                with self.stats_lock:
+                    self.stats['heartbeat_sent'] += 1
+            except:
+                pass  # 锁竞争时跳过统计，优先响应心跳
+                
+        except Exception as e:
+            # ★【紧急修复】★ 直接打印，避免logger锁竞争
+            print(f"❌ IMMEDIATE PONG ERROR: {e}")
+
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")

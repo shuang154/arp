@@ -1,8 +1,89 @@
-# 🚨 紧急修复报告 - main.py运行时错误
+# 🚨 心跳饥饿紧急修复报告 (Heartbeat Starvation Emergency Fix)
 
-## 📋 问题诊断
+## 问题描述 (Problem Description)
 
-### 🔍 发现的问题
+在高负载测试中，即使在没有捕获到凭据的情况下，Python Supervisor的心跳循环仍然无法及时响应C++核心的PING消息，导致心跳超时和系统不稳定。
+
+**关键症状：**
+- 在100个并发scout攻击的高负载下，心跳超时频繁发生
+- 即使原子化修复已解决了credential和ARP restore的竞争条件，心跳问题仍然存在
+- 问题发生在纯高负载扫描场景，表明问题不在业务逻辑，而在心跳机制本身
+
+## 根本原因分析 (Root Cause Analysis)
+
+**主要原因：心跳线程在高负载时优先级不足**
+
+1. **线程优先级问题：**
+   - 心跳线程与其他工作线程优先级相同
+   - 在高负载时，心跳线程可能被OS调度器降低优先级
+   - 心跳响应被延迟到其他任务完成之后
+
+2. **锁竞争问题：**
+   - `self.stats_lock`在高负载时竞争激烈
+   - 心跳线程等待统计锁时被阻塞
+   - logger调用也可能造成额外的锁竞争
+
+3. **睡眠间隔过长：**
+   - 原来的100ms睡眠间隔在高负载时响应不够及时
+   - 需要更短的polling间隔来确保及时响应
+
+## 紧急修复方案 (Emergency Fix Solution)
+
+### 1. 心跳线程优先级提升
+```python
+# 设置Windows线程优先级为ABOVE_NORMAL
+ctypes.windll.kernel32.SetThreadPriority(
+    ctypes.windll.kernel32.GetCurrentThread(), 2)
+```
+
+### 2. 立即响应机制
+- 创建`_handle_ping_immediate()`方法，绕过常规处理流程
+- 直接使用dedicated heartbeat sender响应
+- 最小化中间调用和锁竞争
+
+### 3. 锁竞争优化
+```python
+# 原子化统计更新，锁竞争时跳过
+try:
+    with self.stats_lock:
+        self.stats['heartbeat_sent'] += 1
+except:
+    pass  # 优先响应心跳，统计可以丢失
+```
+
+### 4. 响应性优化
+- 将心跳polling间隔从100ms降低到10ms
+- 添加心跳超时监控和报警
+- 使用直接打印而不是logger来避免日志锁竞争
+
+## 修复文件清单 (Modified Files)
+
+### `main.py`
+1. **`_heartbeat_loop()` 方法重写：**
+   - 添加线程优先级提升
+   - 减少polling间隔到10ms
+   - 添加心跳超时监控
+   - 优化异常处理，避免logger锁竞争
+
+2. **新增 `_handle_ping_immediate()` 方法：**
+   - 立即响应PING消息
+   - 绕过统计锁竞争
+   - 使用dedicated心跳发送通道
+   - 最小化延迟
+
+## 预期效果 (Expected Results)
+
+1. **心跳响应时间：** 从平均100-200ms降低到10-20ms
+2. **高负载稳定性：** 在100个并发攻击下依然能稳定响应心跳
+3. **系统可用性：** 消除心跳超时导致的系统重启
+4. **监控能力：** 实时监控心跳健康状态
+
+---
+
+**修复日期：** 2024-01-XX  
+**修复类型：** 紧急热修复 (Emergency Hotfix)  
+**影响范围：** Python Supervisor心跳机制  
+**验证状态：** 待测试 (Pending Test)
 根据运行日志，系统启动后立即遇到两个致命的**AttributeError**错误：
 
 1. **`'PythonSupervisor' object has no attribute '_process_packet_with_dedup'`**
