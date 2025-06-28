@@ -23,10 +23,14 @@ class IPCConfig:
     packet_address: str = "ipc:///tmp/arp_spoofer_packets.ipc"
     command_address: str = "ipc:///tmp/arp_spoofer_commands.ipc"
     # ★【修改】★ 拆分PING和PONG地址
-    heartbeat_address: str = "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc"      # C++ -> Python (PING)
-    heartbeat_pong_address: str = "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc" # Python -> C++ (PONG)
+    heartbeat_ping_address: str = "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc"      # C++ -> Python (PING)
+    heartbeat_pong_address: str = "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc"     # Python -> C++ (PONG)
     heartbeat_interval: int = 5000    # 心跳间隔(ms)
     heartbeat_timeout: int = 20000    # 心跳超时(ms)
+    # ★【新增】★ ZMQ高水位标记配置
+    packet_hwm: int = 1000           # 数据包接收队列高水位标记
+    command_hwm: int = 100           # 命令发送队列高水位标记
+    heartbeat_hwm: int = 10          # 心跳队列高水位标记
 
 @dataclass
 class PerformanceConfig:

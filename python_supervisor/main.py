@@ -175,7 +175,7 @@ class PythonSupervisor:
             # 3. Heartbeat PING Receiver (C++ PUSH -> Python PULL)
             self.heartbeat_receiver = self.heartbeat_context.socket(zmq.PULL)
             self.heartbeat_receiver.bind(self.config.ipc.heartbeat_ping_address)
-            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, self.config.heartbeat_timeout_ms)
+            self.heartbeat_receiver.setsockopt(zmq.RCVTIMEO, self.config.ipc.heartbeat_timeout)
             self.heartbeat_receiver.setsockopt(zmq.RCVHWM, self.config.ipc.heartbeat_hwm)
             self.heartbeat_receiver.setsockopt(zmq.LINGER, 0)
 
