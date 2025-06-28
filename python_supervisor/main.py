@@ -680,8 +680,10 @@ class PythonSupervisor:
         heartbeat_failures = 0
         last_heartbeat_time = time.time()
         consecutive_json_errors = 0
+        ping_received = 0  # ★【关键修复】★ 初始化变量，避免UnboundLocalError
         
         while self.heartbeat_running:
+            ping_received_this_round = False  # ★【关键修复】★ 每轮重置标志
             try:
                 # ★【关键修复】★ 使用recv()获取原始字节，然后手动解码
                 raw_message = self.heartbeat_receiver.recv(flags=zmq.NOBLOCK)
@@ -692,8 +694,8 @@ class PythonSupervisor:
                     time.sleep(0.001)
                     continue
                 
-                # ★【调试】★ 每10个消息打印一次原始内容
-                if ping_received % 10 == 0:
+                # ★【调试】★ 每50个消息打印一次原始内容，减少性能开销
+                if ping_received % 50 == 0:
                     print(f"🔍 DEBUG: Raw frame #{ping_received}: {repr(raw_message[:100])}")
 
                 try:
@@ -704,6 +706,7 @@ class PythonSupervisor:
                     # 重置JSON错误计数
                     consecutive_json_errors = 0
                     ping_received += 1
+                    ping_received_this_round = True  # ★【修复】★ 标记本轮收到了PING
                     
                 except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
                     consecutive_json_errors += 1
@@ -742,14 +745,16 @@ class PythonSupervisor:
                 continue
                 
             except Exception as e:
-                # ★【异常兜底】★ 任何其他异常都不能影响心跳
+                # ★【异常兜底】★ 任何其他异常都不能影响心跳，增加详细错误信息
                 print(f"❌ HEARTBEAT THREAD ERROR: {e}")
-                time.sleep(0.01)
+                import traceback
+                traceback.print_exc()  # ★【调试】★ 打印完整错误栈，便于诊断
+                time.sleep(0.01)  # 防止异常风暴
         
         self.logger.info("🫀 Dedicated heartbeat thread finished")
     
     def _send_immediate_pong(self, ping_data, current_time):
-        """★【极速响应】★ 立即发送PONG，零延迟"""
+        """★【极速响应】★ 立即发送PONG，零延迟，带重试机制"""
         try:
             # 构造简单的PONG响应
             pong_response = {
@@ -758,9 +763,24 @@ class PythonSupervisor:
                 "sequence": ping_data.get("sequence", 0),
                 "supervisor_status": "alive"
             }
+            pong_json = json.dumps(pong_response)
             
-            # ★【关键】★ 使用独立心跳sender，绝不与业务通道争抢
-            self.heartbeat_sender.send_string(json.dumps(pong_response), zmq.NOBLOCK)
+            # ★【增强】★ 增加重试机制，确保PONG发送成功
+            for retry in range(3):  # 最多尝试3次
+                try:
+                    # ★【关键】★ 使用独立心跳sender，绝不与业务通道争抢
+                    self.heartbeat_sender.send_string(pong_json, zmq.NOBLOCK)
+                    break  # 发送成功，跳出重试循环
+                except zmq.Again:
+                    if retry < 2:  # 前两次失败时短暂等待
+                        time.sleep(0.001)  # 1ms后重试
+                    else:
+                        print(f"⚠️  PONG send failed after 3 retries")
+                except Exception as e:
+                    if retry < 2:
+                        time.sleep(0.001)
+                    else:
+                        print(f"⚠️  PONG send error: {e}")
             
             # ★【可选统计】★ 非阻塞统计更新
             try:
