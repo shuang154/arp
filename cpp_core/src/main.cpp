@@ -12,6 +12,31 @@
 #include "config_manager.h"
 #include "object_pool.h"
 
+// ★【简化】★ 使用简单的日志类而不是spdlog
+class SimpleLogger {
+public:
+    template<typename... Args>
+    void info(const std::string& format, Args... args) {
+        printf("[INFO] ");
+        printf(format.c_str(), args...);
+        printf("\n");
+    }
+    
+    template<typename... Args>
+    void warn(const std::string& format, Args... args) {
+        printf("[WARN] ");
+        printf(format.c_str(), args...);
+        printf("\n");
+    }
+    
+    template<typename... Args>
+    void error(const std::string& format, Args... args) {
+        printf("[ERROR] ");
+        printf(format.c_str(), args...);
+        printf("\n");
+    }
+};
+
 // 全局原子变量，用于优雅停机
 static std::atomic<bool> g_running(true);
 
@@ -30,13 +55,19 @@ private:
     std::string interface_;
     std::atomic<bool>& running_flag_;
 
+    // ★【新增】★ 日志器
+    std::unique_ptr<SimpleLogger> logger_;
+
     // ★【新增】★ 性能统计
     std::thread monitoring_thread_;
     std::chrono::steady_clock::time_point start_time_;
 
 public:
     ARPSpooferCore(const std::string& iface, std::atomic<bool>& running_flag)
-        : interface_(iface), running_flag_(running_flag) {}
+        : interface_(iface), running_flag_(running_flag) {
+        // ★【新增】★ 初始化简单日志器
+        logger_ = std::make_unique<SimpleLogger>();
+    }
 
     ~ARPSpooferCore() {
         stop();
@@ -82,7 +113,7 @@ public:
         }
 
         std::cout << "[C++ Core] Core modules initialized successfully." << std::endl;
-        utils::print_system_info(); // ★【修复】★ 调用正确的命名空间函数
+        std::cout << utils::get_system_info() << std::endl; // ★【修复】★ 调用正确的函数名
         return true;
     }
 
@@ -92,7 +123,7 @@ public:
 
         // 启动嗅探线程
         std::thread sniffer_thread([this]() {
-            sniffer_->start_sniffing(running_flag_);
+            sniffer_->start_sniffing();  // ★【修复】★ 移除参数
         });
 
         // 主循环只处理来自Python的命令
@@ -118,23 +149,23 @@ public:
 
 private:
     void process_command(const IPCCommand& cmd) {
-        // (这里的命令处理逻辑保持不变)
-        if (cmd.type == "START_SPOOF") {
-        // ★【修复】★ 直接调用spoofer，不再需要add_target
-        spoofer_->start_spoofing(cmd.target_ip, cmd.gateway_ip, cmd.duration);
-    } else if (cmd.type == "RESTORE_ARP") {
-        // ★【修复】★ 提供所有需要的参数
-        if (!cmd.target_mac.empty() && !cmd.gateway_mac.empty()) {
-            spoofer_->restore_arp(cmd.target_ip, cmd.gateway_ip, cmd.target_mac, cmd.gateway_mac);
+        // ★【修复】★ 使用枚举类型比较而不是字符串
+        if (cmd.type == CommandType::START_SPOOF) {
+            // ★【修复】★ 调用正确的函数签名
+            spoofer_->start_spoofing(cmd.target_ip, cmd.gateway_ip, cmd.target_mac, cmd.gateway_mac, cmd.duration, cmd.attack_type);
+        } else if (cmd.type == CommandType::RESTORE_ARP) {
+            // ★【修复】★ 提供所有需要的参数
+            if (!cmd.target_mac.empty() && !cmd.gateway_mac.empty()) {
+                spoofer_->restore_arp(cmd.target_ip, cmd.gateway_ip, cmd.target_mac, cmd.gateway_mac);
+            } else {
+                logger_->warn("Cannot restore ARP, MAC addresses missing for IP: {}", cmd.target_ip);
+            }
+        } else if (cmd.type == CommandType::SHUTDOWN) {
+            logger_->info("Shutdown command received, initiating graceful shutdown...");
+            running_flag_.store(false);
         } else {
-            logger_->warn("Cannot restore ARP, MAC addresses missing for IP: {}", cmd.target_ip);
+            std::cerr << "[Command] Received unknown command type." << std::endl;
         }
-    } else if (cmd.type == "SHUTDOWN") {
-        logger_->info("Shutdown command received, initiating graceful shutdown...");
-        running_flag_.store(false);
-    } else {
-        std::cerr << "[Command] Received unknown command type." << std::endl;
-    }
     }
 };
 

@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <atomic>
 
 /**
  * 高性能对象池模板类
@@ -16,6 +17,7 @@ class ObjectPool {
 private:
     std::vector<T*> pool_;
     mutable std::mutex pool_mutex_; // ★【修复】★ 声明为mutable，允许在const函数中加锁
+    std::function<std::unique_ptr<T>()> factory_; // ★【修复】★ 添加缺失的factory_成员
     size_t initial_size_;
     size_t max_size_;
     
@@ -130,7 +132,7 @@ private:
     /**
      * 重置对象状态（可以被特化）
      */
-    void reset_object(T* obj) {
+    virtual void reset_object(T* obj) {
         // 默认实现为空，子类可以重写
         // 例如：重置计数器、清空缓冲区等
     }
@@ -141,22 +143,25 @@ private:
 
 class PacketInfoPool : public ObjectPool<PacketInfo> {
 public:
-    PacketInfoPool(size_t initial_size, size_t max_size)
-        : ObjectPool<PacketInfo>(initial_size, max_size) {}
+    PacketInfoPool(size_t initial_size = 100, size_t max_size = 1000)
+        : ObjectPool<PacketInfo>(
+            []() -> std::unique_ptr<PacketInfo> { 
+                return std::make_unique<PacketInfo>(); 
+            },
+            initial_size, 
+            max_size
+        ) {}
 
 protected:
-    PacketInfo* create_new() override {
-        return new PacketInfo();
-    }
-
     void reset_object(PacketInfo* pkt) override {
         if (pkt) {
-            pkt->timestamp = 0;
+            pkt->timestamp = {0, 0};  // ★【修复】★ 正确初始化timeval结构
             pkt->src_ip.clear();
             pkt->dst_ip.clear();
-            pkt->protocol = 0;
+            pkt->type = PacketType::UNKNOWN;  // ★【修复】★ 使用正确的字段名
             pkt->length = 0;
-            pkt->data.clear();
+            pkt->payload_length = 0;  // ★【修复】★ 使用正确的字段名
+            memset(pkt->payload, 0, MAX_PAYLOAD_SIZE);  // ★【修复】★ 使用payload而不是data
         }
     }
 };
