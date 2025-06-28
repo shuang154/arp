@@ -103,7 +103,7 @@ void IPCManager::heartbeat_thread_func() {
                     // ★【关键】★ 只有发送成功后才更新时间戳和计数器
                     last_ping_time = std::chrono::steady_clock::now();
                     pings_sent_++;
-                    // std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // 调试时开启
+                    std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // ★【启用调试】★
                 }
             } catch (const zmq::error_t& e) {
                 // ★【关键修复】★ 捕获所有网络错误，不更新时间戳
@@ -131,7 +131,7 @@ void IPCManager::heartbeat_thread_func() {
                         doc.HasMember("type") && doc["type"].IsString() &&
                         std::string(doc["type"].GetString()) == "PONG") {
                         handle_pong();
-                        // std::cout << "[Heartbeat] Received PONG: " << pong_str << std::endl; // 调试时开启
+                        std::cout << "[Heartbeat] Received PONG: " << pong_str << std::endl; // ★【启用调试】★
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "[Heartbeat] Failed to parse PONG JSON: " << e.what() << std::endl;

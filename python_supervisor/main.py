@@ -699,35 +699,45 @@ class PythonSupervisor:
                     print(f"🔍 DEBUG: Raw frame #{ping_received}: {repr(raw_message[:100])}")
 
                 try:
-                    # ★【关键修复】★ 手动解码并解析JSON，完全控制异常
-                    message_str = raw_message.decode('utf-8', errors='replace')
-                    ping_data = json.loads(message_str)
+                    # ★【兼容性修复】★ 手动解码并处理两种格式：JSON 和简单字符串
+                    message_str = raw_message.decode('utf-8', errors='replace').strip()
                     
-                    # 重置JSON错误计数
-                    consecutive_json_errors = 0
-                    ping_received += 1
-                    ping_received_this_round = True  # ★【修复】★ 标记本轮收到了PING
+                    # 尝试解析为JSON格式
+                    if message_str.startswith('{'):
+                        # JSON格式的PING消息
+                        ping_data = json.loads(message_str)
+                        is_ping = ping_data.get("type") == "PING"
+                    else:
+                        # 简单字符串格式的PING消息（C++兼容性）
+                        is_ping = message_str == "PING"
+                        ping_data = {"type": "PING", "timestamp": time.time(), "sequence": ping_received}
+                    
+                    if is_ping:
+                        # 重置JSON错误计数
+                        consecutive_json_errors = 0
+                        ping_received += 1
+                        ping_received_this_round = True  # ★【修复】★ 标记本轮收到了PING
+                        
+                        # 立即处理PING
+                        current_time = time.time()
+                        self._send_immediate_pong(ping_data, current_time)
+                        
+                        # 重置失败计数
+                        heartbeat_failures = 0
+                        last_heartbeat_time = current_time
+                    else:
+                        # 不是PING消息，跳过
+                        continue
                     
                 except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
                     consecutive_json_errors += 1
                     if consecutive_json_errors <= 5:  # 只记录前5次
-                        print(f"⚠️  HEARTBEAT JSON ERROR #{consecutive_json_errors}: {e}")
+                        print(f"⚠️  HEARTBEAT PARSE ERROR #{consecutive_json_errors}: {e}")
                         print(f"     Raw message: {repr(raw_message[:100])}")
                     
-                    # ★【关键】★ JSON错误不影响心跳，直接继续
+                    # ★【关键】★ 解析错误不影响心跳，直接继续
                     time.sleep(0.001)
                     continue
-                
-                # ★【关键逻辑】★ 处理有效的PING消息
-                if ping_data.get("type") == "PING":
-                    current_time = time.time()
-                    
-                    # ★【立即响应】★ 最快速度回复PONG，避免任何可能的延迟
-                    self._send_immediate_pong(ping_data, current_time)
-                    
-                    # 重置失败计数
-                    heartbeat_failures = 0
-                    last_heartbeat_time = current_time
                     
             except zmq.Again:
                 # ★【超时检查】★ 检查心跳超时
@@ -770,6 +780,11 @@ class PythonSupervisor:
                 try:
                     # ★【关键】★ 使用独立心跳sender，绝不与业务通道争抢
                     self.heartbeat_sender.send_string(pong_json, zmq.NOBLOCK)
+                    
+                    # ★【调试】★ 每隔一段时间打印PONG发送确认
+                    if ping_data.get("sequence", 0) % 10 == 0:
+                        print(f"🫀 PONG sent for sequence #{ping_data.get('sequence', 0)}")
+                    
                     break  # 发送成功，跳出重试循环
                 except zmq.Again:
                     if retry < 2:  # 前两次失败时短暂等待
