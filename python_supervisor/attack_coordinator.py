@@ -107,7 +107,7 @@ class ScoutLauncher:
         
         self.command_sender = None
         
-        self.logger.info(f"🚀 ScoutLauncher initialized with buffer pool (capacity: 100)")
+        self.logger.info(f"🚀 Scout启动器已初始化，带缓冲池 (容量: 100)")
         
     def set_command_sender(self, sender):
         """设置命令发送器"""
@@ -136,7 +136,7 @@ class ScoutLauncher:
     
     def _execute_tasks_from_buffer(self):
         """★【第二步核心】★ 从缓冲池循环获取并执行任务"""
-        self.logger.info("🔄 Scout task executor started - monitoring buffer pool")
+        self.logger.info("🔄 Scout任务执行器已启动 - 监控缓冲池")
         
         while self.executor_running:
             try:
@@ -194,7 +194,7 @@ class ScoutLauncher:
             # 发送给队列处理
             if self.command_sender:
                 self.command_sender(command)
-                self.logger.info(f"🚀 Scout launched for {target_ip} (Active: {len(self.active_scouts)}/{self.max_concurrent})")
+                self.logger.info(f"🚀 Scout已启动目标 {target_ip} (活跃: {len(self.active_scouts)}/{self.max_concurrent})")
             
             # 60秒后释放信号量
             threading.Timer(60.0, self._release_scout, args=[target_ip]).start()
@@ -250,7 +250,7 @@ class AttackCoordinator:
         if is_arm:
             initial_rate = flow_control_config.get('arm_initial_rate', 3.0)
             buffer_size = flow_control_config.get('arm_buffer_size', 30)
-            self.logger.info(f"🔧 ARM platform detected, using conservative flow control")
+            self.logger.info(f"🔧 检测到ARM平台，使用保守流控")
         else:
             initial_rate = flow_control_config.get('initial_rate', 5.0)
             buffer_size = flow_control_config.get('buffer_size', 50)
@@ -261,7 +261,7 @@ class AttackCoordinator:
             name="AttackCoordinator"
         )
         
-        self.logger.info(f"🔧 Flow control initialized - Rate: {initial_rate}/s, Buffer: {buffer_size}")
+        self.logger.info(f"🔧 流控初始化完成 - 速率: {initial_rate}/秒, 缓冲: {buffer_size}")
         
         # ★【方案一】★ 并发控制器 - 令牌桶限流
         self.concurrency_controller = ConcurrencyController(
@@ -509,7 +509,7 @@ class AttackCoordinator:
                 
                 # 直接尝试 Scout 调度
                 if self.scout_launcher.schedule_scout(target_ip, gateway_ip):
-                    self.logger.info(f"🚀 Scout scheduled for {target_ip}")
+                    self.logger.info(f"🚀 Scout已调度目标 {target_ip}")
                     with self.stats_lock:
                         self.stats['scouts_authorized'] += 1
                     return None
@@ -518,7 +518,7 @@ class AttackCoordinator:
                     # 移除所有直接攻击的fallback逻辑，确保AdaptiveFlowController是唯一的流控点
                     with self.stats_lock:
                         self.stats['decisions_fully_blocked'] = self.stats.get('decisions_fully_blocked', 0) + 1
-                    self.logger.info(f"🚫 Scout launcher full, decision dropped for {target_ip} (strict flow control enforcement)")
+                    self.logger.info(f"🚫 Scout启动器已满，丢弃目标 {target_ip} 的决策 (严格流控执行)")
                     return None
                         
             finally:
@@ -1102,7 +1102,7 @@ class AttackCoordinator:
             # ★【强化去重】★ ARM平台使用更长的去重时间窗口
             self.event_dedup_ttl = concurrency_config.get('event_dedup_ttl_arm', 8)  # 从5秒延长到8秒
             self.command_dedup_ttl = concurrency_config.get('command_dedup_ttl_arm', 5)  # 从3秒延长到5秒
-            self.logger.info(f"🔧 ARM platform detected - Scout: {self.scout_max}@{self.scout_launch_rate}/s, Attack: {self.attack_max}@{self.attack_refill_rate}/s, Dedup TTL: {self.event_dedup_ttl}s")
+            self.logger.info(f"🔧 检测到ARM平台 - Scout: {self.scout_max}@{self.scout_launch_rate}/秒, Attack: {self.attack_max}@{self.attack_refill_rate}/秒, 去重TTL: {self.event_dedup_ttl}秒")
         else:
             # x86平台正常配置
             self.scout_max = concurrency_config.get('scout_max_x86', 50)
@@ -1117,7 +1117,7 @@ class AttackCoordinator:
         # ★【新增】★ 设置处理TTL为去重TTL，确保一致性
         self.processing_ttl = self.event_dedup_ttl
         
-        self.logger.info(f"🛡️ IP deduplication window extended to {self.processing_ttl}s for enhanced protection")
+        self.logger.info(f"🛡️ IP去重窗口已扩展至 {self.processing_ttl}秒 以增强保护")
     
     def get_deduplication_stats(self) -> dict:
         """获取去重机制统计信息"""
