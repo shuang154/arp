@@ -6,6 +6,7 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <iomanip> // For std::setprecision and std::fixed
 
 PacketSniffer::PacketSniffer(const std::string& interface, IPCManager* ipc)
     : interface_(interface), handle_(nullptr), ipc_manager_(ipc), 
@@ -100,12 +101,31 @@ void PacketSniffer::stop() {
         running_ = false;
         pcap_breakloop(handle_);
         
-        // 获取统计信息
+        // 获取详细统计信息
         struct pcap_stat stats;
         if (pcap_stats(handle_, &stats) == 0) {
             packets_dropped_ = stats.ps_drop;
-            std::cout << "[Sniffer] Final stats - Captured: " << packets_captured_
-                      << ", Dropped: " << packets_dropped_ << std::endl;
+            
+            // 🔧 增强：计算捕获率和性能指标
+            uint64_t total_packets = packets_captured_ + packets_dropped_;
+            double capture_rate = total_packets > 0 ? 
+                (double)packets_captured_ / total_packets * 100.0 : 0.0;
+            
+            std::cout << "[Sniffer] ===== Final Performance Report =====" << std::endl;
+            std::cout << "[Sniffer] Packets Captured: " << packets_captured_ << std::endl;
+            std::cout << "[Sniffer] Packets Dropped: " << packets_dropped_ << std::endl;
+            std::cout << "[Sniffer] Total Packets: " << total_packets << std::endl;
+            std::cout << "[Sniffer] Capture Rate: " << std::fixed << std::setprecision(2) 
+                      << capture_rate << "%" << std::endl;
+            
+            // 🔧 性能警告机制
+            if (capture_rate < 95.0 && packets_dropped_ > 100) {
+                std::cout << "[Sniffer] ⚠️  WARNING: Low capture rate detected!" << std::endl;
+                std::cout << "[Sniffer] 💡 Consider: Reduce buffer size, increase CPU priority, or optimize filters" << std::endl;
+            } else if (capture_rate >= 99.0) {
+                std::cout << "[Sniffer] ✅ Excellent capture performance!" << std::endl;
+            }
+            std::cout << "[Sniffer] =======================================" << std::endl;
         }
         
         pcap_close(handle_);

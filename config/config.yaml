@@ -4,7 +4,7 @@
 # 网络配置
 network:
   interface: "wlan0"             # 香橙派网卡接口名
-  gateway_ip: "10.17.0.1"     # 网关IP
+  gateway_ip: "10.17.0.1"       # 网关IP
   target_server: "121.248.150.37" # 目标服务器IP
   target_ports: [80, 443, 8080, 801]  # 监听端口
 
@@ -13,17 +13,22 @@ ipc:
   packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
   command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
 
-# 性能配置 (香橙派优化)
+# 性能配置 (香橙派优化 - 8线程高性能模式)
 performance:
-  max_worker_threads: 4          # 🔧 减少到4个以避免过载
+  max_worker_threads: 8          # 🔧 提升到8个以充分利用I/O等待时间
   packet_buffer_size: 8388608    # 8MB 数据包缓冲区
   command_timeout: 1000          # 命令超时时间(ms)
+  # 🔧 新增：数据包处理优化配置
+  packet_batch_size: 15          # 🔧 增加批大小以配合更多线程
+  packet_batch_timeout: 0.08     # 🔧 减少超时以提高响应速度
+  zmq_rcv_hwm: 15000            # 🔧 增加接收缓冲区
+  zmq_snd_hwm: 1500             # 🔧 增加发送缓冲区
 
 # 攻击策略
 attack:
   stealth_mode: false            # 隐蔽模式
   attack_timeout: 45             # 攻击超时时间(秒)
-  max_concurrent_attacks: 8      # 🔧 减少到8个以匹配线程数
+  max_concurrent_attacks: 12     # 🔧 提升到12个以配合8线程 (1.5倍比例)
   cooldown_time: 3600           # 冷却时间(秒)
 
 # 缓存配置

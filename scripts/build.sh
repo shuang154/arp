@@ -356,24 +356,54 @@ start_services() {
     fi
 }
 
-# 清理函数
+# 强力清理函数 - 根治孤儿进程
 cleanup() {
     echo "正在停止服务..."
     
+    # 优雅关闭 -> 强制关闭的三步策略
     if [ -f /tmp/arp_spoofer_core.pid ]; then
         CPP_PID=$(cat /tmp/arp_spoofer_core.pid)
+        echo "停止C++核心进程 (PID: $CPP_PID)..."
+        
+        # 第1步：优雅关闭 (SIGTERM)
         kill -TERM "$CPP_PID" 2>/dev/null || true
+        sleep 2
+        
+        # 第2步：检查是否还存活，强制终止 (SIGKILL)
+        if kill -0 "$CPP_PID" 2>/dev/null; then
+            echo "强制终止顽固进程 $CPP_PID"
+            kill -KILL "$CPP_PID" 2>/dev/null || true
+            sleep 1
+        fi
+        
         rm -f /tmp/arp_spoofer_core.pid
     fi
     
     if [ -f /tmp/arp_spoofer_supervisor.pid ]; then
         PYTHON_PID=$(cat /tmp/arp_spoofer_supervisor.pid)
+        echo "停止Python监督者进程 (PID: $PYTHON_PID)..."
+        
+        # 第1步：优雅关闭 (SIGTERM)
         kill -TERM "$PYTHON_PID" 2>/dev/null || true
+        sleep 2
+        
+        # 第2步：检查是否还存活，强制终止 (SIGKILL)
+        if kill -0 "$PYTHON_PID" 2>/dev/null; then
+            echo "强制终止顽固进程 $PYTHON_PID"
+            kill -KILL "$PYTHON_PID" 2>/dev/null || true
+            sleep 1
+        fi
+        
         rm -f /tmp/arp_spoofer_supervisor.pid
     fi
     
+    # 第3步：清理任何残留的相关进程
+    echo "清理残留进程..."
+    pkill -f "arp_core" 2>/dev/null || true
+    pkill -f "python.*main.py" 2>/dev/null || true
+    
     rm -f /tmp/arp_spoofer_*.ipc
-    echo "服务已停止"
+    echo "✅ 服务已完全停止，无孤儿进程残留"
 }
 
 # 设置信号处理

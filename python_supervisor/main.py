@@ -112,15 +112,19 @@ class PythonSupervisor:
             self.packet_receiver = self.context.socket(zmq.PULL)
             self.packet_receiver.bind(self.config.packet_ipc_address)
             self.packet_receiver.setsockopt(zmq.RCVTIMEO, 1000)  # 1秒超时
+            # 🔧 优化：增加高水位线，减少数据包丢失
+            self.packet_receiver.setsockopt(zmq.RCVHWM, self.config.performance.zmq_rcv_hwm)
             
             # 发送命令的套接字（PUSH模式）
             self.command_sender = self.context.socket(zmq.PUSH)
             self.command_sender.bind(self.config.command_ipc_address)
             self.command_sender.setsockopt(zmq.SNDTIMEO, 1000)  # 1秒超时
+            # 🔧 优化：增加发送缓冲区，减少命令阻塞
+            self.command_sender.setsockopt(zmq.SNDHWM, self.config.performance.zmq_snd_hwm)
             
-            self.logger.info(f"ZMQ sockets initialized:")
-            self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address}")
-            self.logger.info(f"  - Command sender: {self.config.command_ipc_address}")
+            self.logger.info(f"ZMQ sockets initialized with optimized buffers:")
+            self.logger.info(f"  - Packet receiver: {self.config.packet_ipc_address} (RCVHWM: {self.config.performance.zmq_rcv_hwm})")
+            self.logger.info(f"  - Command sender: {self.config.command_ipc_address} (SNDHWM: {self.config.performance.zmq_snd_hwm})")
             
             return True
             
@@ -132,6 +136,12 @@ class PythonSupervisor:
         """运行主循环"""
         self.running = True
         self.logger.info("Starting main supervisor loop...")
+        
+        # 🔧 新增：批量处理缓冲区，减少线程池压力
+        packet_buffer = []
+        buffer_size = self.config.performance.packet_batch_size  # 🔧 使用配置值
+        batch_timeout = self.config.performance.packet_batch_timeout  # 🔧 使用配置值
+        last_flush_time = time.time()
         
         try:
             while self.running:
@@ -155,11 +165,28 @@ class PythonSupervisor:
                         self.logger.warning(f"Received invalid JSON data, skipping")
                         continue
                     
-                    # 提交给线程池处理
-                    self.thread_pool.submit(self._process_packet, packet_data)
+                    # 🔧 优化：批量收集数据包
+                    packet_buffer.append(packet_data)
+                    
+                    # 批量提交或定时刷新
+                    current_time = time.time()
+                    if len(packet_buffer) >= buffer_size or (current_time - last_flush_time) > batch_timeout:
+                        # 批量提交给线程池处理
+                        for pkt_data in packet_buffer:
+                            self.thread_pool.submit(self._process_packet, pkt_data)
+                        
+                        packet_buffer.clear()
+                        last_flush_time = current_time
                     
                 except zmq.Again:
-                    # 没有数据包，短暂休眠
+                    # 没有数据包，刷新缓冲区
+                    if packet_buffer:
+                        for pkt_data in packet_buffer:
+                            self.thread_pool.submit(self._process_packet, pkt_data)
+                        packet_buffer.clear()
+                        last_flush_time = time.time()
+                    
+                    # 短暂休眠
                     time.sleep(0.001)
                     continue
                     
@@ -170,6 +197,11 @@ class PythonSupervisor:
         except KeyboardInterrupt:
             self.logger.info("Received interrupt signal")
         finally:
+            # 刷新剩余缓冲区
+            if packet_buffer:
+                for pkt_data in packet_buffer:
+                    self.thread_pool.submit(self._process_packet, pkt_data)
+            
             self._shutdown()
             
     def _process_packet(self, packet_data: str):

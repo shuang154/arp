@@ -26,16 +26,21 @@ class IPCConfig:
 @dataclass
 class PerformanceConfig:
     """性能配置"""
-    max_worker_threads: int = 4  # 🔧 减少到4个以避免过载
+    max_worker_threads: int = 8  # 🔧 提升到8个以充分利用I/O等待时间
     packet_buffer_size: int = 8388608  # 8MB
     command_timeout: int = 1000  # ms
+    # 🔧 新增：数据包处理优化配置
+    packet_batch_size: int = 15  # 🔧 增加批大小以配合更多线程
+    packet_batch_timeout: float = 0.08  # 🔧 减少超时以提高响应速度
+    zmq_rcv_hwm: int = 15000  # 🔧 增加接收缓冲区
+    zmq_snd_hwm: int = 1500   # 🔧 增加发送缓冲区
 
 @dataclass
 class AttackConfig:
     """攻击策略配置"""
     stealth_mode: bool = False
     attack_timeout: int = 45  # seconds
-    max_concurrent_attacks: int = 8  # 🔧 减少到8个以匹配线程数
+    max_concurrent_attacks: int = 12  # 🔧 提升到12个以配合8线程
     cooldown_time: int = 3600  # seconds
 
 @dataclass
@@ -185,6 +190,10 @@ class Config:
                 config.performance.max_worker_threads = perf_config.get('max_worker_threads', config.performance.max_worker_threads)
                 config.performance.packet_buffer_size = perf_config.get('packet_buffer_size', config.performance.packet_buffer_size)
                 config.performance.command_timeout = perf_config.get('command_timeout', config.performance.command_timeout)
+                config.performance.packet_batch_size = perf_config.get('packet_batch_size', config.performance.packet_batch_size)
+                config.performance.packet_batch_timeout = perf_config.get('packet_batch_timeout', config.performance.packet_batch_timeout)
+                config.performance.zmq_rcv_hwm = perf_config.get('zmq_rcv_hwm', config.performance.zmq_rcv_hwm)
+                config.performance.zmq_snd_hwm = perf_config.get('zmq_snd_hwm', config.performance.zmq_snd_hwm)
             
             if 'attack' in yaml_data:
                 attack_config = yaml_data['attack']
@@ -241,7 +250,11 @@ class Config:
             'performance': {
                 'max_worker_threads': self.performance.max_worker_threads,
                 'packet_buffer_size': self.performance.packet_buffer_size,
-                'command_timeout': self.performance.command_timeout
+                'command_timeout': self.performance.command_timeout,
+                'packet_batch_size': self.performance.packet_batch_size,
+                'packet_batch_timeout': self.performance.packet_batch_timeout,
+                'zmq_rcv_hwm': self.performance.zmq_rcv_hwm,
+                'zmq_snd_hwm': self.performance.zmq_snd_hwm
             },
             'attack': {
                 'stealth_mode': self.attack.stealth_mode,
