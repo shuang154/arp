@@ -300,22 +300,17 @@ class PythonSupervisor:
             # ★★★【关键修复】★★★ 首先通过 AdaptiveFlowController 进行流量控制
             if not self.attack_coordinator.adaptive_flow_controller.should_process_packet():
                 self._safe_stats_increment('packets_dropped')
-                self.logger.debug("Packet dropped by AdaptiveFlowController")
+                self.logger.info("🚫 Packet dropped by AdaptiveFlowController (rate limited)")
                 return
             
             # 分析数据包
             analysis_result = self.packet_analyzer.analyze(packet_info)
             
             if analysis_result:
-                # ★★★【关键修复】★★★ 优先处理高价值事件，确保原子性
-                if hasattr(analysis_result, 'http_credentials') and analysis_result.http_credentials:
-                    # 高价值事件使用专门的原子处理方法
-                    self.attack_coordinator.process_high_value_event_atomic(analysis_result)
-                else:
-                    # 常规事件使用普通决策流程
-                    decision = self.attack_coordinator.make_decision(analysis_result)
-                    if decision:
-                        self._execute_decision(decision)
+                # ★★★【关键修复】★★★ 所有事件都通过统一的决策流程，确保流控生效
+                decision = self.attack_coordinator.make_decision(analysis_result)
+                if decision:
+                    self._execute_decision(decision)
                     
         except json.JSONDecodeError:
             self._safe_stats_increment('packets_dropped')

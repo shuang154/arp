@@ -154,6 +154,18 @@ adaptive_flow_control:
     restricted_rate_factor: 0.2   # 限制模式下的速率因子（20%）
     recovery_rate_factor: 1.0     # 恢复模式下的速率因子（100%）
 
-  # ★【配置化改进】★ 从配置文件读取并发控制参数
-  # 从config.yaml读取或使用默认值
-  concurrency_control:
+# ★★★【新增：自适应流量控制配置】★★★
+# 三层防护机制：速率限制 -> 去重 -> 任务缓冲池节流
+flow_control:
+  initial_rate: 5.0              # ★【第一层】★ 初始速率限制（每秒请求数）- 保守配置
+  buffer_size: 50                # ★【第三层】★ 任务缓冲池大小 - 避免内存占用过高
+  min_rate: 1.0                  # 最小速率限制
+  max_rate: 20.0                 # 最大速率限制（即使在恢复模式下也不超过此值）
+  
+  # 动态调整参数
+  pressure_threshold: 0.8        # 压力阈值（0.8 = 80%满载时开始限制）
+  adjustment_interval: 2.0       # 调整间隔（秒）
+  
+  # ARM平台优化
+  arm_initial_rate: 3.0          # ARM平台更保守的初始速率
+  arm_buffer_size: 30            # ARM平台更小的缓冲池

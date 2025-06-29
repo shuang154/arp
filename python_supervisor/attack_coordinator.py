@@ -242,11 +242,26 @@ class AttackCoordinator:
         self._load_concurrency_config()
         
         # ★【新增：自适应流量控制器】★ 实现智能前端限流和后端缓冲
+        # ★【配置化设计】★ 从配置文件读取流控参数，保持系统可控性
+        flow_control_config = getattr(self.config, 'flow_control', {})
+        
+        # ★【平台优化】★ ARM平台使用更保守的配置
+        is_arm = platform.machine().startswith(('arm', 'aarch'))
+        if is_arm:
+            initial_rate = flow_control_config.get('arm_initial_rate', 3.0)
+            buffer_size = flow_control_config.get('arm_buffer_size', 30)
+            self.logger.info(f"🔧 ARM platform detected, using conservative flow control")
+        else:
+            initial_rate = flow_control_config.get('initial_rate', 5.0)
+            buffer_size = flow_control_config.get('buffer_size', 50)
+        
         self.adaptive_flow_controller = AdaptiveFlowController(
-            initial_rate=50.0,  # 从配置文件读取
-            buffer_size=100,    # Scout任务缓冲池大小
+            initial_rate=initial_rate,
+            buffer_size=buffer_size,
             name="AttackCoordinator"
         )
+        
+        self.logger.info(f"🔧 Flow control initialized - Rate: {initial_rate}/s, Buffer: {buffer_size}")
         
         # ★【方案一】★ 并发控制器 - 令牌桶限流
         self.concurrency_controller = ConcurrencyController(
@@ -443,38 +458,18 @@ class AttackCoordinator:
                     if task is None:
                         continue  # 超时，继续循环
                     
-                    # 检查任务是否过期
+                    # ★【关键修复】★ 任务已经在主循环中通过流量控制，这里直接丢弃过期任务
                     task_age = time.time() - task['created_time']
                     if task_age > 60:  # 任务超过60秒视为过期
                         self.logger.debug(f"⏰ Discarded expired adaptive task for {task['target_ip']} (age: {task_age:.1f}s)")
                         continue
                     
-                    # 使用Scout发射器处理任务
-                    target_ip = task['target_ip']
-                    gateway_ip = task['gateway_ip']
+                    # ★【架构修复】★ Adaptive Task Processor 现在只负责清理过期任务
+                    # 实际的 Scout 调度已经在主循环中通过 make_decision 完成
+                    self.logger.debug(f"✅ Task for {task['target_ip']} processed (delegated to main decision flow)")
                     
-                    if self.scout_launcher.schedule_scout(target_ip, gateway_ip):
-                        self.logger.debug(f"✅ Adaptive task for {target_ip} processed via Scout launcher")
-                    else:
-                        # Scout launcher也满了，尝试直接攻击
-                        if self.concurrency_controller.acquire_token():
-                            # 发送直接攻击命令
-                            if self.command_sender:
-                                command = {
-                                    'type': 'START_SPOOF',
-                                    'target_ip': target_ip,
-                                    'gateway_ip': gateway_ip,
-                                    'attack_type': 'direct',
-                                    'duration': 60
-                                }
-                                self.command_sender(command)
-                                self.logger.info(f"🎯 Adaptive task for {target_ip} processed as direct attack")
-                        else:
-                            # 所有通道都满了，将任务重新放回缓冲池（降级优先级）
-                            task['priority'] = 'deferred'
-                            task['created_time'] = time.time()
-                            if not self.adaptive_flow_controller.submit_task(task):
-                                self.logger.warning(f"⚠️ Failed to requeue adaptive task for {target_ip}")
+                    # ★【重要】★ 不再在这里调用 scout_launcher 或发送命令
+                    # 所有任务调度都通过主循环的 make_decision 统一处理
                 
                 except Exception as e:
                     self.logger.error(f"Error in adaptive task processor: {e}")
@@ -492,18 +487,14 @@ class AttackCoordinator:
         self.logger.info("🚀 Started adaptive task processor thread")
 
     def make_decision(self, analysis_result) -> Optional[AttackDecision]:
-        """根据分析结果制定攻击决策 v3.0 - 自适应流量控制 + 强化去重版"""
+        """根据分析结果制定攻击决策 v4.0 - 纯去重版（流控已在上层处理）"""
         try:
             target_ip = analysis_result.src_ip if hasattr(analysis_result, 'src_ip') else analysis_result.source_ip
             
-            # ★【第三步：前端智能阀门】★ 基于后端压力的自适应流量控制
-            if not self.adaptive_flow_controller.should_process_packet():
-                with self.stats_lock:
-                    self.stats['decisions_rate_limited'] = self.stats.get('decisions_rate_limited', 0) + 1
-                self.logger.debug(f"🚫 Decision rate-limited for {target_ip} due to downstream pressure")
-                return None  # 被前端流量控制丢弃
+            # ★★★【架构修复】★★★ 流控已在main.py中处理，这里只做去重和业务逻辑
+            # 移除重复的流控检查，避免双重限制和逻辑混乱
             
-            # ★【第二道防线：强化IP去重】★ 检查是否正在处理中（防止脉冲式攻击）
+            # ★【第一道防线：IP去重】★ 检查是否正在处理中（防止脉冲式攻击）
             if not self._check_and_mark_processing(target_ip):
                 # 注意：这里不需要统计，因为_check_and_mark_processing内部已经统计了
                 return None  # 已在处理，触发去重保护
@@ -513,30 +504,22 @@ class AttackCoordinator:
                 if not self._should_attack(target_ip, analysis_result):
                     return None
                 
-                # ★【第二步增强】★ 智能任务调度 - 优先使用自适应缓冲池
+                # ★【第二步核心修复】★ 直接调度 Scout，不再使用缓冲池
                 gateway_ip = getattr(analysis_result, 'gateway_ip', None) or "10.17.0.1"
                 
-                # 创建Scout任务
-                scout_task = {
-                    'target_ip': target_ip,
-                    'gateway_ip': gateway_ip,
-                    'analysis_result': analysis_result,
-                    'created_time': time.time(),
-                    'priority': 'normal'
-                }
-                
-                # ★【第二步核心】★ 使用自适应流量控制器的缓冲池（弃老保新）
-                if self.adaptive_flow_controller.submit_task(scout_task):
-                    self.logger.info(f"🎫 Scout task for {target_ip} submitted to adaptive buffer")
+                # 直接尝试 Scout 调度
+                if self.scout_launcher.schedule_scout(target_ip, gateway_ip):
+                    self.logger.info(f"🚀 Scout scheduled for {target_ip}")
                     with self.stats_lock:
                         self.stats['scouts_authorized'] += 1
-                    return None  # 任务已提交到缓冲池，异步处理
+                    return None
                 else:
-                    # 缓冲池满了，记录并丢弃任务
-                    self.logger.warning(f"🚫 Adaptive buffer full, dropping task for {target_ip} (system overloaded)")
+                    # ★★★【关键修复】★★★ Scout launcher 满时，严格遵循流控架构，不允许任何绕过
+                    # 移除所有直接攻击的fallback逻辑，确保AdaptiveFlowController是唯一的流控点
                     with self.stats_lock:
-                        self.stats['tasks_dropped_buffer_full'] = self.stats.get('tasks_dropped_buffer_full', 0) + 1
-                    return None  # 系统过载，直接丢弃任务
+                        self.stats['decisions_fully_blocked'] = self.stats.get('decisions_fully_blocked', 0) + 1
+                    self.logger.info(f"🚫 Scout launcher full, decision dropped for {target_ip} (strict flow control enforcement)")
+                    return None
                         
             finally:
                 # ★【重要】★ 处理完成，移除标记（无论成功还是失败）
