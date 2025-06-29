@@ -15,7 +15,7 @@ ipc:
 
 # 性能配置 (香橙派优化)
 performance:
-  max_worker_threads: 8          # 香橙派4核，每核2线程
+  max_worker_threads: 4          # 🔧 减少到4个以避免过载
   packet_buffer_size: 8388608    # 8MB 数据包缓冲区
   command_timeout: 1000          # 命令超时时间(ms)
 
@@ -23,7 +23,7 @@ performance:
 attack:
   stealth_mode: false            # 隐蔽模式
   attack_timeout: 45             # 攻击超时时间(秒)
-  max_concurrent_attacks: 20     # 最大并发攻击数 (香橙派优化)
+  max_concurrent_attacks: 8      # 🔧 减少到8个以匹配线程数
   cooldown_time: 3600           # 冷却时间(秒)
 
 # 缓存配置

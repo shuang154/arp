@@ -6,7 +6,10 @@ python3 local_diagnosis.py
 
 
 
+cd /home/zs/文档/projects/arp_s/scripts && sudo ./build.sh
 
+sudo pkill -9 -f arp_core     杀死残留进程
+sudo ./build.sh --force   重新构建
 
 
 

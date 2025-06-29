@@ -26,7 +26,7 @@ class IPCConfig:
 @dataclass
 class PerformanceConfig:
     """性能配置"""
-    max_worker_threads: int = 8
+    max_worker_threads: int = 4  # 🔧 减少到4个以避免过载
     packet_buffer_size: int = 8388608  # 8MB
     command_timeout: int = 1000  # ms
 
@@ -35,7 +35,7 @@ class AttackConfig:
     """攻击策略配置"""
     stealth_mode: bool = False
     attack_timeout: int = 45  # seconds
-    max_concurrent_attacks: int = 20
+    max_concurrent_attacks: int = 8  # 🔧 减少到8个以匹配线程数
     cooldown_time: int = 3600  # seconds
 
 @dataclass

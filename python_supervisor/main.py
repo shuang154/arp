@@ -246,7 +246,7 @@ class PythonSupervisor:
         
         # 停止线程池
         if self.thread_pool:
-            self.thread_pool.shutdown(wait=True, timeout=5.0)
+            self.thread_pool.shutdown(wait=True)
             
         # 停止Web API
         if self.config.enable_web_api:

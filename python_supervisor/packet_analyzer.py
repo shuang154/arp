@@ -197,8 +197,11 @@ class PacketAnalyzer:
                 }
             )
             
-            self.logger.info(f"HTTP analysis: {src_ip} -> {dst_ip}:{dst_port} "
-                           f"(credentials: {'Yes' if credentials else 'No'})")
+            # 🔧 精简日志：只记录有凭据的重要事件
+            if credentials:
+                self.logger.info(f"🔑 HTTP credentials found: {src_ip} -> {dst_ip}:{dst_port}")
+            else:
+                self.logger.debug(f"HTTP analysis: {src_ip} -> {dst_ip}:{dst_port} (no credentials)")
             
             return result
             
