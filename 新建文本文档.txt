@@ -5,9 +5,9 @@ sudo ./build.sh
 python3 local_diagnosis.py
 
 
+cd /home/zs/文档/projects/arp_pro/scripts && sudo ./build.sh
 
-
-
+sudo pkill -9 -f arp_core
 
 
 ARP Spoofer Pro 项目完整指令总结

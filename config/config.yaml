@@ -64,11 +64,11 @@ attack:
     attack_refill_rate_x86: 4     # x86平台Attack令牌桶补充速率/秒 (从6降到4)
     attack_refill_rate_arm: 1     # ARM平台Attack令牌桶补充速率/秒 (从3降到1) ★【削峰】★
     
-    # 去重控制
-    event_dedup_ttl_x86: 5        # x86平台事件去重TTL(秒)
-    event_dedup_ttl_arm: 5        # ARM平台事件去重TTL(秒)
-    command_dedup_ttl_x86: 3      # x86平台命令去重TTL(秒)
-    command_dedup_ttl_arm: 3      # ARM平台命令去重TTL(秒)
+    # 去重控制 - ★【强化防御】★ 延长去重时间窗口，防止脉冲式攻击
+    event_dedup_ttl_x86: 10       # x86平台事件去重TTL(秒) - 从5秒延长到10秒
+    event_dedup_ttl_arm: 8        # ARM平台事件去重TTL(秒) - 从5秒延长到8秒
+    command_dedup_ttl_x86: 6      # x86平台命令去重TTL(秒) - 从3秒延长到6秒
+    command_dedup_ttl_arm: 5      # ARM平台命令去重TTL(秒) - 从3秒延长到5秒
     
     # 随机延迟控制 - 填谷策略
     random_delay_min_ms: 50       # 最小随机延迟(毫秒) (从10增到50) ★【填谷】★
@@ -128,3 +128,32 @@ security:
   # ★【新增】★ 配置热重载
   enable_config_reload: true    # 启用配置热重载
   config_check_interval: 10     # 配置文件检查间隔(秒)
+
+# ★【新增】★ 动态自适应流量控制配置
+adaptive_flow_control:
+  # 令牌桶配置
+  token_bucket:
+    initial_rate: 50.0            # 初始令牌生成速率（每秒）
+    capacity: 100                 # 令牌桶容量
+    min_rate: 5.0                 # 最小速率（限制模式）
+    max_rate: 100.0               # 最大速率（正常模式）
+  
+  # 任务缓冲池配置
+  task_buffer:
+    scout_buffer_size: 100        # Scout任务缓冲池大小
+    attack_buffer_size: 50        # Attack任务缓冲池大小
+    
+  # 自适应控制阈值
+  pressure_thresholds:
+    high_pressure_percent: 75     # 高压阈值（%）
+    low_pressure_percent: 30      # 低压阈值（%）
+    min_adjustment_interval: 2.0  # 最小调整间隔（秒）
+    
+  # 速率调整策略
+  rate_adjustment:
+    restricted_rate_factor: 0.2   # 限制模式下的速率因子（20%）
+    recovery_rate_factor: 1.0     # 恢复模式下的速率因子（100%）
+
+  # ★【配置化改进】★ 从配置文件读取并发控制参数
+  # 从config.yaml读取或使用默认值
+  concurrency_control:
