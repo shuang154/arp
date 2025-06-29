@@ -1,0 +1,61 @@
+# ARP Spoofer Pro 配置文件 - 简化版 🚀
+# =======================================================
+# 专为香橙派优化，移除复杂配置，追求稳定高效
+
+# 网络配置
+network:
+  interface: "wlan0"             # 香橙派网卡接口名
+  gateway_ip: "10.17.0.1"       # 网关IP
+  target_server: "121.248.150.37" # 目标服务器IP
+  target_ports: [80, 443, 8080, 801]  # 监听端口
+
+# IPC通信配置
+ipc:
+  packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
+  command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
+  heartbeat_ping_address: "ipc:///tmp/arp_spoofer_heartbeat_ping.ipc"
+  heartbeat_pong_address: "ipc:///tmp/arp_spoofer_heartbeat_pong.ipc"
+  # ★【简化】★ 心跳配置 - 回归老版本的稳定参数
+  heartbeat_interval: 5000       # 心跳间隔(ms)
+  heartbeat_timeout: 15000       # 心跳超时(ms) - 使用老版本的15秒
+  packet_hwm: 1000               # 数据包通道HWM
+  command_hwm: 500               # 命令通道HWM  
+  heartbeat_hwm: 100             # 心跳通道HWM
+
+# ★【简化】★ 性能配置
+performance:
+  max_worker_threads: 4          # 减少到4个线程，匹配香橙派核心数
+  packet_buffer_size: 4194304    # 4MB 数据包缓冲区
+  command_timeout: 1000          # 命令超时时间(ms)
+
+# ★【简化】★ 攻击配置 - 回归简单直接
+attack:
+  # 基本配置
+  default_duration: 60           # 默认攻击持续时间 (秒)
+  cooldown_time: 300            # 冷却时间 (5分钟)
+  
+  # ★【核心简化】★ 统一并发控制，移除Scout/Attack分离
+  concurrency_control:
+    attack:
+      max_concurrent: 15         # 最大并发攻击数 - 与老版本一致
+  
+  # ★【简化】★ 限流配置
+  max_decisions_per_second: 10   # 每秒最多处理10个决策
+
+# 缓存配置
+cache:
+  arp_cache_ttl: 1800           # ARP缓存TTL(秒)
+  attack_cache_ttl: 3600        # 攻击记录TTL(秒)
+
+# 日志配置
+logging:
+  level: "INFO"                  # 日志级别
+  file: "/var/log/arp_spoofer.log"
+  max_size: 104857600           # 100MB
+  backup_count: 5
+
+# Web API配置
+web_api:
+  enabled: false                 # 禁用Web API，减少资源占用
+  port: 8080
+  host: "0.0.0.0"
