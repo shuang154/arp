@@ -1,0 +1,84 @@
+# ARP Spoofer Pro 配置文件 - 香橙派优化版 v2.0 🚀
+# =======================================================
+
+# 网络配置
+network:
+  interface: "wlan0"             # 香橙派网卡接口名
+  gateway_ip: "10.17.0.1"       # 网关IP
+  target_server: "121.248.150.37" # 目标服务器IP
+  target_ports: [80, 443, 8080, 801]  # 监听端口
+
+# IPC通信配置
+ipc:
+  packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
+  command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
+  # ★【新增】★ 心跳配置
+  heartbeat_interval: 5000       # 心跳间隔(ms)
+  heartbeat_timeout: 15000       # 心跳超时(ms)
+
+# 性能配置 (香橙派优化)
+performance:
+  max_worker_threads: 8          # 香橙派4核，每核2线程
+  packet_buffer_size: 8388608    # 8MB 数据包缓冲区
+  command_timeout: 1000          # 命令超时时间(ms)
+  # ★【新增】★ 对象池配置
+  object_pool_initial_size: 1000 # 对象池初始大小
+  object_pool_max_size: 5000     # 对象池最大大小
+  
+# ★【新增】★ CPU亲和性配置
+cpu_affinity:
+  enable_cpu_binding: true       # 启用CPU绑定
+  sniffer_cpu: 1                 # 数据包嗅探线程CPU
+  ipc_cpu: 2                     # IPC处理线程CPU
+  main_cpu: 0                    # 主线程CPU
+  auto_detect_cores: true        # 自动检测CPU核心数
+
+# 攻击策略
+attack:
+  stealth_mode: false            # 隐蔽模式
+  attack_timeout: 45             # 攻击超时时间(秒)
+  max_concurrent_attacks: 20     # 最大并发攻击数 (香橙派优化)
+  cooldown_time: 3600           # 冷却时间(秒)
+
+# 缓存配置
+cache:
+  arp_cache_ttl: 1800           # ARP缓存TTL(秒)
+  attack_cache_ttl: 3600        # 攻击记录TTL(秒)
+  target_info_ttl: 7200         # 目标信息TTL(秒)
+
+# 日志配置
+logging:
+  level: "INFO"                  # 日志级别
+  file: "/var/log/arp_spoofer.log"
+  max_size: 104857600           # 100MB
+  backup_count: 5
+
+# Web API配置
+web_api:
+  enabled: true                  # 启用Web API
+  port: 8080                    # 监听端口
+  host: "0.0.0.0"              # 监听所有接口
+
+# ★【新增】★ 优雅停机配置
+graceful_shutdown:
+  enable: true                   # 启用优雅停机
+  phase_timeout: 5000           # 每个阶段超时时间(ms)
+  total_timeout: 30000          # 总超时时间(ms)
+  save_state_on_exit: true      # 退出时保存状态
+
+# ★【新增】★ 性能监控配置
+monitoring:
+  enable_performance_monitoring: true  # 启用性能监控
+  stats_report_interval: 30     # 统计信息报告间隔(秒)
+  system_health_check: true     # 系统健康检查
+  memory_usage_threshold: 80    # 内存使用率告警阈值(%)
+  cpu_usage_threshold: 90       # CPU使用率告警阈值(%)
+
+# 安全配置
+security:
+  require_root: true            # 需要root权限
+  bind_to_cpu: true            # 绑定CPU核心
+  memory_limit: 536870912      # 512MB内存限制 (香橙派优化)
+  # ★【新增】★ 配置热重载
+  enable_config_reload: true    # 启用配置热重载
+  config_check_interval: 10     # 配置文件检查间隔(秒)

