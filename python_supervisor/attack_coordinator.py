@@ -532,35 +532,11 @@ class AttackCoordinator:
                         self.stats['scouts_authorized'] += 1
                     return None  # 任务已提交到缓冲池，异步处理
                 else:
-                    # 缓冲池满了，记录并继续尝试fallback
-                    self.logger.debug(f"Adaptive buffer submission failed for {target_ip}, trying fallback")
-                    
-                    # Fallback 1: 尝试直接使用Scout发射器
-                    if self.scout_launcher.schedule_scout(target_ip, gateway_ip):
-                        self.logger.info(f"� Scout scheduled via fallback for {target_ip}")
-                        with self.stats_lock:
-                            self.stats['scouts_authorized'] += 1
-                        return None
-                    else:
-                        # Fallback 2: 尝试直接攻击
-                        if self.concurrency_controller.acquire_token():
-                            decision = AttackDecision(
-                                action="attack",
-                                target_ip=target_ip,
-                                gateway_ip=gateway_ip,
-                                attack_type="direct",
-                                duration=60
-                            )
-                            self.logger.info(f"🎯 Direct attack authorized for {target_ip} (all buffers full)")
-                            with self.stats_lock:
-                                self.stats['attacks_authorized'] += 1
-                            return decision
-                        else:
-                            # 所有通道都满了，记录并丢弃
-                            with self.stats_lock:
-                                self.stats['decisions_fully_blocked'] = self.stats.get('decisions_fully_blocked', 0) + 1
-                            self.logger.warning(f"🚫 All processing channels full, dropping decision for {target_ip}")
-                            return None
+                    # 缓冲池满了，记录并丢弃任务
+                    self.logger.warning(f"🚫 Adaptive buffer full, dropping task for {target_ip} (system overloaded)")
+                    with self.stats_lock:
+                        self.stats['tasks_dropped_buffer_full'] = self.stats.get('tasks_dropped_buffer_full', 0) + 1
+                    return None  # 系统过载，直接丢弃任务
                         
             finally:
                 # ★【重要】★ 处理完成，移除标记（无论成功还是失败）

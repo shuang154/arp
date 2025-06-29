@@ -55,18 +55,17 @@ class PythonSupervisor:
         
         # ★【ARM优化】★ 检测平台并调整参数
         self.is_arm_platform = platform.machine().startswith(('arm', 'aarch'))
-        # ★【关键修复】★ 延长去重缓存时间窗口，防止事件风暴
-        self.cache_ttl = 10  # 从2秒延长到10秒，更强的去重保护
+        self.cache_ttl = 2  # TTL时间
         
         if self.is_arm_platform:
-            # ARM平台更保守配置，防止资源耗尽
-            max_threads = min(config.max_worker_threads, 2)  # 进一步限制为2线程
-            queue_size = 200    # 进一步减小队列
-            self.logger.info("🔧 ARM platform detected, using ultra-conservative settings")
+            # ARM平台保守配置
+            max_threads = min(config.max_worker_threads, 4)  # 限制为4线程
+            queue_size = 500    # 减小队列
+            self.logger.info("🔧 ARM platform detected, using conservative settings")
         else:
-            # x86平台配置，但仍然保守以防止事件风暴
-            max_threads = min(config.max_worker_threads, 4)  # 从8减少到4
-            queue_size = 500    # 从1000减少到500
+            # x86平台正常配置
+            max_threads = min(config.max_worker_threads, 8)
+            queue_size = 1000
         
         # ★【新增】★ 批量命令处理
         self.command_queue = queue.Queue(maxsize=queue_size)
@@ -261,18 +260,8 @@ class PythonSupervisor:
             # 1. 将原始二进制数据转换为字符串
             packet_data = raw_data.decode('utf-8')
             
-            # 2. ★【强化去重】★ 多层次去重机制
-            # 第一层：原始数据包去重
+            # 2. ★【关键优化】★ 快速哈希去重，避免重复处理
             packet_hash = hashlib.md5(packet_data.encode()).hexdigest()
-            
-            # 第二层：解析后提取源IP进行更激进的去重
-            try:
-                packet_info = json.loads(packet_data)
-                source_ip = packet_info.get('source_ip', packet_info.get('src_ip', 'unknown'))
-                # 针对同一源IP的包，使用更长的去重时间窗口
-                ip_dedup_key = f"ip_{source_ip}"
-            except:
-                ip_dedup_key = None
             
             with self.cache_lock:
                 current_time = time.time()
@@ -283,24 +272,12 @@ class PythonSupervisor:
                 for key in expired_keys:
                     del self.recent_packets_cache[key]
                 
-                # 第一层检查：完全相同的数据包
                 if packet_hash in self.recent_packets_cache:
                     self._safe_stats_increment('packets_dropped')
                     return  # 重复数据包，直接丢弃
                 
-                # 第二层检查：同一IP的包在短时间内只处理一次（防止风暴）
-                if ip_dedup_key and ip_dedup_key in self.recent_packets_cache:
-                    recent_time = self.recent_packets_cache[ip_dedup_key][1]
-                    # 同一IP在3秒内只处理一次，更激进的去重
-                    if current_time - recent_time < 3.0:
-                        self._safe_stats_increment('packets_dropped')
-                        self.logger.debug(f"IP-level dedup blocked packet from {source_ip}")
-                        return
-                
                 # 添加到去重缓存
                 self.recent_packets_cache[packet_hash] = (True, current_time)
-                if ip_dedup_key:
-                    self.recent_packets_cache[ip_dedup_key] = (True, current_time)
             
             # 3. 执行实际的数据包处理
             self._process_packet(packet_data)
@@ -319,6 +296,12 @@ class PythonSupervisor:
             # 解析数据包
             packet_info = json.loads(packet_data)
             self._safe_stats_increment('packets_processed')
+            
+            # ★★★【关键修复】★★★ 首先通过 AdaptiveFlowController 进行流量控制
+            if not self.attack_coordinator.adaptive_flow_controller.should_process_packet():
+                self._safe_stats_increment('packets_dropped')
+                self.logger.debug("Packet dropped by AdaptiveFlowController")
+                return
             
             # 分析数据包
             analysis_result = self.packet_analyzer.analyze(packet_info)

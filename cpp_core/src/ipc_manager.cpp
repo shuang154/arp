@@ -208,13 +208,23 @@ std::optional<IPCCommand> IPCManager::receive_command(int timeout_ms) {
 
 bool IPCManager::send_packet(const PacketInfo& packet) {
     try {
+        // ★【架构说明】★ C++ 端负责发送数据包到 Python 端
+        // 流量控制在 Python 端的 AdaptiveFlowController 中进行
         std::string json_data = serialize_packet(packet);
         zmq::message_t message(json_data.size());
         memcpy(message.data(), json_data.c_str(), json_data.size());
 
+        // ★【性能优化】★ 使用非阻塞发送，避免因队列满而阻塞C++端
         if (packet_sender_->send(message, zmq::send_flags::dontwait)) {
             packets_sent_++;
             return true;
+        } else {
+            // ★【监控】★ 记录发送失败（通常是Python端处理不及时导致队列满）
+            static std::atomic<size_t> send_drops{0};
+            send_drops++;
+            if (send_drops.load() % 100 == 0) { // 每100次丢包记录一次
+                std::cerr << "[IPC Manager] Packet send queue full, total drops: " << send_drops.load() << std::endl;
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "[IPC Manager] Send packet failed: " << e.what() << std::endl;
