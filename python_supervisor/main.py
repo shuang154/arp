@@ -22,21 +22,64 @@ from typing import Optional, Dict
 from datetime import datetime
 
 # 导入C++核心模块
+CPP_MODULE_AVAILABLE = False
+USE_FALLBACK = False
+
 try:
     import arp_core_cpp
     print("✅ C++ core module loaded successfully")
+    
     # 安全地获取版本信息（如果存在）
     version = getattr(arp_core_cpp, '__version__', 'unknown')
     description = getattr(arp_core_cpp, '__description__', 'ARP Spoofer C++ Core')
     print(f"📦 Module version: {version}")
     print(f"📋 Description: {description}")
+    
+    # 🔧 调试：列出模块中所有可用的属性
+    print("🔍 Available attributes in arp_core_cpp module:")
+    module_attrs = [attr for attr in dir(arp_core_cpp) if not attr.startswith('_')]
+    for attr in module_attrs:
+        attr_type = type(getattr(arp_core_cpp, attr)).__name__
+        print(f"  - {attr} ({attr_type})")
+    
+    # 🔧 检查关键类是否存在
+    required_classes = ['ARPSpoofer', 'PacketSniffer', 'ThreadPool']
+    missing_classes = []
+    for cls_name in required_classes:
+        if not hasattr(arp_core_cpp, cls_name):
+            missing_classes.append(cls_name)
+        else:
+            print(f"✅ Found {cls_name} class")
+    
+    if missing_classes:
+        print(f"❌ Missing required classes: {missing_classes}")
+        print("This indicates a C++ compilation or binding issue.")
+        print("\n🔧 Possible solutions:")
+        print("1. Rebuild the C++ module:")
+        print("   cd cpp_core && rm -rf build && mkdir build && cd build")
+        print("   cmake .. && make clean && make -j$(nproc)")
+        print("2. Check if all source files are present and compiling")
+        print("3. Verify pybind11 is installed: pip install pybind11")
+        print("4. Run the diagnostic script: python test_cpp_module.py")
+        print(f"\n📋 Available classes in module: {module_attrs}")
+        print("\n⚠️ Falling back to Python implementation...")
+        USE_FALLBACK = True
+    else:
+        CPP_MODULE_AVAILABLE = True
+        
 except ImportError as e:
     print(f"❌ Failed to import C++ core module: {e}")
     print("Please build the C++ module first:")
     print("  cd cpp_core && mkdir build && cd build")
     print("  cmake .. && make -j$(nproc)")
     print("  The module should be available as arp_core_cpp.so")
-    sys.exit(1)
+    print("\n⚠️ Falling back to Python implementation...")
+    USE_FALLBACK = True
+
+# 导入回退实现
+if USE_FALLBACK:
+    from python_fallback import PythonARPSpoofer, PythonPacketSniffer
+    print("📦 Python fallback implementation loaded")
 
 from config import Config
 
@@ -102,24 +145,54 @@ class PythonSupervisor:
     def initialize(self) -> bool:
         """初始化监督者和C++核心"""
         try:
-            self.logger.info("🚀 Initializing Python Supervisor v3.0 with C++ Core...")
+            if USE_FALLBACK:
+                self.logger.warning("⚠️ Using Python fallback implementation (reduced performance)")
+                self.logger.info("🚀 Initializing Python Supervisor v3.0 with Python Fallback...")
+            else:
+                self.logger.info("🚀 Initializing Python Supervisor v3.0 with C++ Core...")
+            
+            # 🔧 检查必需的类是否可用（仅在使用C++模块时）
+            if not USE_FALLBACK:
+                if not hasattr(arp_core_cpp, 'ARPSpoofer'):
+                    self.logger.error("❌ ARPSpoofer class not found in C++ module")
+                    self.logger.error("This indicates a C++ compilation problem. Available classes:")
+                    available = [attr for attr in dir(arp_core_cpp) if not attr.startswith('_')]
+                    for attr in available:
+                        self.logger.error(f"  - {attr}")
+                    return False
+                    
+                if not hasattr(arp_core_cpp, 'PacketSniffer'):
+                    self.logger.error("❌ PacketSniffer class not found in C++ module")
+                    return False
             
             # 🔧 创建ARP欺骗器（使用网络接口）
             interface = self.config.network.interface or "wlan0"  # 修正：使用network.interface
-            self.arp_spoofer = arp_core_cpp.ARPSpoofer(interface)
+            self.logger.info(f"📡 Creating ARPSpoofer with interface: {interface}")
+            
+            if USE_FALLBACK:
+                self.arp_spoofer = PythonARPSpoofer(interface)
+            else:
+                self.arp_spoofer = arp_core_cpp.ARPSpoofer(interface)
             
             # 🔧 初始化ARP欺骗器
             if not self.arp_spoofer.initialize():
-                self.logger.error("❌ Failed to initialize C++ ARP Spoofer")
+                self.logger.error("❌ Failed to initialize ARP Spoofer")
                 return False
             
             # 🔧 创建数据包嗅探器
-            self.packet_sniffer = arp_core_cpp.PacketSniffer(interface)
+            self.logger.info(f"📡 Creating PacketSniffer with interface: {interface}")
+            
+            if USE_FALLBACK:
+                self.packet_sniffer = PythonPacketSniffer(interface)
+            else:
+                self.packet_sniffer = arp_core_cpp.PacketSniffer(interface)
+                
             if not self.packet_sniffer.initialize():
                 self.logger.error("❌ Failed to initialize packet sniffer")
                 return False
             
-            self.logger.info("✅ C++ Core initialized successfully")
+            impl_type = "Python Fallback" if USE_FALLBACK else "C++ Core"
+            self.logger.info(f"✅ {impl_type} initialized successfully")
             self.logger.info(f"📡 Using network interface: {interface}")
             
             # 启动Web API（如果启用且可用）
@@ -137,6 +210,8 @@ class PythonSupervisor:
             
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize supervisor: {e}")
+            import traceback
+            self.logger.error(f"Stack trace: {traceback.format_exc()}")
             return False
             
     def run(self):
@@ -180,23 +255,30 @@ class PythonSupervisor:
                         active_sessions = self.arp_spoofer.get_active_sessions_count()
                         active_targets = self.arp_spoofer.get_active_targets()
                         
-                        # 获取线程池统计
-                        queue_sizes = self.arp_spoofer.get_thread_pool_queue_sizes()
-                        completion_rate = self.arp_spoofer.get_thread_pool_completion_rate()
-                        
-                        # 检测异常情况
-                        if completion_rate < 90.0:
-                            self.logger.warning(f"⚠️ 线程池完成率较低: {completion_rate:.1f}%")
-                        
-                        # 检查线程池负载均衡
-                        if queue_sizes and max(queue_sizes) > min(queue_sizes) * 3:
-                            self.logger.warning("⚠️ 线程池负载不均衡")
-                        
-                        # 定期输出统计信息
-                        self.logger.info(
-                            f"📈 Stats: 📤 Sent={packets_sent}, 🎯 Active={active_sessions}, "
-                            f"📊 Rate={completion_rate:.1f}%, 🧵 Queues={len(queue_sizes)}"
-                        )
+                        # 获取线程池统计（仅C++版本支持）
+                        if not USE_FALLBACK:
+                            queue_sizes = self.arp_spoofer.get_thread_pool_queue_sizes()
+                            completion_rate = self.arp_spoofer.get_thread_pool_completion_rate()
+                            
+                            # 检测异常情况
+                            if completion_rate < 90.0:
+                                self.logger.warning(f"⚠️ 线程池完成率较低: {completion_rate:.1f}%")
+                            
+                            # 检查线程池负载均衡
+                            if queue_sizes and max(queue_sizes) > min(queue_sizes) * 3:
+                                self.logger.warning("⚠️ 线程池负载不均衡")
+                                
+                            # 定期输出统计信息
+                            self.logger.info(
+                                f"📈 Stats: 📤 Sent={packets_sent}, 🎯 Active={active_sessions}, "
+                                f"📊 Rate={completion_rate:.1f}%, 🧵 Queues={len(queue_sizes)}"
+                            )
+                        else:
+                            # Python回退版本的简化统计
+                            self.logger.info(
+                                f"📈 Stats (Python): 📤 Sent={packets_sent}, 🎯 Active={active_sessions}, "
+                                f"🏷️ Total={sessions}"
+                            )
                     
                     # 获取数据包嗅探器统计
                     if hasattr(self, 'packet_sniffer'):
@@ -408,6 +490,8 @@ def main():
             print("✅ Using pure YAML configuration (no command line overrides)")
             
         # 打印最终使用的关键配置
+        impl_mode = "C++ High Performance" if CPP_MODULE_AVAILABLE and not USE_FALLBACK else "Python Fallback"
+        print(f"📋 Implementation: {impl_mode}")
         print(f"📋 Final config - Interface: {config.network.interface}, Gateway: {config.network.gateway_ip}")
         print(f"📋 Performance - Threads: {config.performance.max_worker_threads}, Attack freq: {getattr(config.attack, 'attack_frequency', 'default')}")
         
