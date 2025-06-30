@@ -36,7 +36,15 @@ if(NOT pybind11_FOUND)
     if(PYBIND11_CMAKE_DIR)
         find_package(pybind11 REQUIRED HINTS ${PYBIND11_CMAKE_DIR})
     else()
-        message(FATAL_ERROR "pybind11 not found. Install with: pip3 install pybind11")
+        # 检查虚拟环境中的pybind11
+        execute_process(COMMAND python3 -m venv venv && source venv/bin/activate && python -c "import pybind11; print(pybind11.get_cmake_dir())" 
+                        OUTPUT_VARIABLE VENV_PYBIND11_CMAKE_DIR 
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(VENV_PYBIND11_CMAKE_DIR)
+            find_package(pybind11 REQUIRED HINTS ${VENV_PYBIND11_CMAKE_DIR})
+        else()
+            message(FATAL_ERROR "pybind11 not found. Install with: pip3 install pybind11 or use a virtual environment.")
+        endif()
     endif()
 endif()
 
