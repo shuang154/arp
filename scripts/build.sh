@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# ARP Spoofer Pro - 完整构建和部署脚本 (香橙派 Arch Linux)
-# =======================================================
+# ARP Spoofer C++ Core - 香橙派一键部署脚本
+# =============================================
+# 功能：构建、配置、启动（单一脚本完成所有操作）
+# 优化：关闭Web功能，专注核心性能
 
 set -e  # 遇到错误立即退出
 
@@ -12,65 +14,152 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# 项目路径配置
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CPP_DIR="${PROJECT_ROOT}/cpp_core"
+CPP_DIR="${PROJECT_ROOT}/cpp_core_v2"  # 修正：使用v2版本
 PYTHON_DIR="${PROJECT_ROOT}/python_supervisor"
 BUILD_DIR="${CPP_DIR}/build"
 CONFIG_DIR="${PROJECT_ROOT}/config"
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  ARP Spoofer Pro - 香橙派部署脚本${NC}"
+echo -e "${BLUE}  ARP Spoofer C++ Core - 香橙派版${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}项目路径: ${PROJECT_ROOT}${NC}"
 echo ""
 
-# 检查系统依赖
+# 全局变量
+INTERFACE=""
+DAEMON_MODE=false
+FORCE_BUILD=false
+
+# 显示帮助信息
+show_help() {
+    echo "ARP Spoofer C++ Core - 一键部署脚本"
+    echo ""
+    echo "用法: sudo $0 [选项]"
+    echo ""
+    echo "选项:"
+    echo "  -i, --interface IFACE  指定网络接口 (必需)"
+    echo "  -d, --daemon          后台运行模式"
+    echo "  -f, --force           强制重新构建"
+    echo "  -h, --help            显示帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  sudo $0 -i eth0       # 在eth0接口上运行"
+    echo "  sudo $0 -i wlan0 -d   # 在wlan0接口上后台运行"
+    echo "  sudo $0 -i eth0 -f    # 强制重构建后运行"
+    echo ""
+    echo "可用网络接口:"
+    ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//' 2>/dev/null || echo "  无法获取接口列表"
+}
+
+# 解析命令行参数
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i|--interface)
+                INTERFACE="$2"
+                shift 2
+                ;;
+            -d|--daemon)
+                DAEMON_MODE=true
+                shift
+                ;;
+            -f|--force)
+                FORCE_BUILD=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}未知选项: $1${NC}"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # 检查必需参数
+    if [ -z "$INTERFACE" ]; then
+        echo -e "${RED}错误: 必须指定网络接口${NC}"
+        echo ""
+        show_help
+        exit 1
+    fi
+}
+
+# 检查root权限
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}错误: 此脚本需要root权限运行${NC}"
+        echo "请使用: sudo $0 $@"
+        exit 1
+    fi
+}
+
+# 检查网络接口
+check_interface() {
+    if ! ip link show "$INTERFACE" &>/dev/null; then
+        echo -e "${RED}错误: 网络接口 '$INTERFACE' 不存在${NC}"
+        echo ""
+        echo "可用网络接口:"
+        ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
+        exit 1
+    fi
+    echo -e "${GREEN}✓ 网络接口 '$INTERFACE' 检查通过${NC}"
+}
+
+# 智能依赖检查（支持多种Linux发行版）
 check_dependencies() {
     echo -e "${YELLOW}检查系统依赖...${NC}"
     
     local missing_deps=()
     
-    if ! command -v cmake &> /dev/null; then
-        missing_deps+=("cmake")
+    # 基础工具检查
+    command -v cmake >/dev/null 2>&1 || missing_deps+=("cmake")
+    command -v g++ >/dev/null 2>&1 || missing_deps+=("gcc-c++")
+    command -v python3 >/dev/null 2>&1 || missing_deps+=("python3")
+    command -v pip3 >/dev/null 2>&1 || missing_deps+=("python3-pip")
+    command -v pkg-config >/dev/null 2>&1 || missing_deps+=("pkg-config")
+    
+    # 开发库检查
+    if ! pkg-config --exists libzmq 2>/dev/null; then
+        missing_deps+=("zeromq-devel")
     fi
     
-    if ! command -v g++ &> /dev/null; then
-        missing_deps+=("gcc")
+    if ! pkg-config --exists jsoncpp 2>/dev/null; then
+        missing_deps+=("jsoncpp-devel")
     fi
     
-    if ! command -v python3 &> /dev/null; then
-        missing_deps+=("python")
-    fi
-    
-    if ! command -v pip3 &> /dev/null; then
-        missing_deps+=("python-pip")
-    fi
-    
-    # 检查开发库
-    if ! pkg-config --exists libpcap; then
-        missing_deps+=("libpcap")
-    fi
-    
-    if [ ! -f "/usr/include/zmq.hpp" ] && [ ! -f "/usr/local/include/zmq.hpp" ]; then
-        missing_deps+=("zeromq" "cppzmq")
-    fi
-    
-    if [ ! -f "/usr/include/rapidjson/rapidjson.h" ]; then
-        missing_deps+=("rapidjson")
+    # 检查pybind11
+    if ! python3 -c "import pybind11" 2>/dev/null; then
+        missing_deps+=("python3-pybind11")
     fi
     
     if [ ${#missing_deps[@]} -ne 0 ]; then
         echo -e "${RED}缺少以下依赖:${NC}"
-        printf '%s\n' "${missing_deps[@]}"
+        printf '  %s\n' "${missing_deps[@]}"
         echo ""
-        echo -e "${YELLOW}Arch Linux 安装命令:${NC}"
-        echo "sudo pacman -Syu --needed cmake gcc python python-pip libpcap zeromq cppzmq rapidjson pkgconf"
+        echo -e "${YELLOW}安装命令建议:${NC}"
+        
+        # 检测发行版并提供相应的安装命令
+        if command -v pacman >/dev/null 2>&1; then
+            echo "Arch Linux: sudo pacman -Syu cmake gcc python python-pip zeromq cppzmq jsoncpp"
+        elif command -v apt-get >/dev/null 2>&1; then
+            echo "Ubuntu/Debian: sudo apt-get install cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev"
+        elif command -v yum >/dev/null 2>&1; then
+            echo "CentOS/RHEL: sudo yum install cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel"
+        fi
+        
         echo ""
-        read -p "是否现在安装这些依赖? (y/n): " -n 1 -r
+        read -p "是否现在自动安装这些依赖? (y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            sudo pacman -Syu --needed cmake gcc python python-pip libpcap zeromq cppzmq rapidjson pkgconf
+            auto_install_deps
         else
+            echo -e "${RED}请手动安装依赖后重新运行脚本${NC}"
             exit 1
         fi
     fi
@@ -78,9 +167,53 @@ check_dependencies() {
     echo -e "${GREEN}✓ 所有依赖已满足${NC}"
 }
 
+# 自动安装依赖
+auto_install_deps() {
+    echo -e "${YELLOW}自动安装依赖...${NC}"
+    
+    if command -v pacman >/dev/null 2>&1; then
+        # Arch Linux
+        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Ubuntu/Debian
+        apt-get update
+        apt-get install -y cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev pkg-config
+    elif command -v yum >/dev/null 2>&1; then
+        # CentOS/RHEL
+        yum install -y cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel pkg-config
+    else
+        echo -e "${RED}无法识别的包管理器，请手动安装依赖${NC}"
+        exit 1
+    fi
+    
+    # 安装pybind11
+    pip3 install pybind11
+}
+
+# 检查是否需要构建
+need_build() {
+    if [ "$FORCE_BUILD" = true ]; then
+        echo -e "${YELLOW}强制重构建模式${NC}"
+        return 0  # 需要构建
+    fi
+    
+    # 检查C++模块是否存在
+    if [ ! -f "${PYTHON_DIR}/arp_core_cpp"*.so ] && [ ! -f "${PYTHON_DIR}/arp_core_cpp"*.pyd ]; then
+        return 0  # 需要构建
+    fi
+    
+    # 检查配置文件是否存在
+    if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
+        return 0  # 需要构建
+    fi
+    
+    echo -e "${GREEN}✓ 检测到已构建的版本${NC}"
+    return 1  # 不需要构建
+}
+
 # 构建C++核心
 build_cpp_core() {
-    echo -e "${YELLOW}构建C++核心引擎...${NC}"
+    echo -e "${YELLOW}构建C++核心...${NC}"
     
     if [ ! -d "$CPP_DIR" ]; then
         echo -e "${RED}错误: C++源码目录不存在: $CPP_DIR${NC}"
@@ -91,576 +224,227 @@ build_cpp_core() {
     
     # 清理旧的构建文件
     if [ -d "${BUILD_DIR}" ]; then
-        echo "清理旧的构建文件..."
+        echo "清理旧构建..."
         rm -rf "${BUILD_DIR}"
     fi
     mkdir -p "${BUILD_DIR}"
     
     cd "${BUILD_DIR}"
     
-    # 配置CMake
+    # 配置CMake（ARM优化）
     echo "配置CMake..."
-    cmake .. -DCMAKE_BUILD_TYPE=Release
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_STANDARD=17 \
+        -DPYTHON_EXECUTABLE=$(which python3)
     
-    # 编译
-    echo "开始编译..."
-    make -j$(nproc)
+    # 编译（使用所有CPU核心）
+    local cpu_cores=$(nproc)
+    echo "编译中... (使用 $cpu_cores 核心)"
+    make -j"$cpu_cores"
     
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ C++核心引擎编译成功${NC}"
-        
-        # 检查可执行文件
-        if [ -f "arp_core" ]; then
-            echo -e "${GREEN}✓ 可执行文件: ${BUILD_DIR}/arp_core${NC}"
-        else
-            echo -e "${RED}✗ 可执行文件未找到${NC}"
-            exit 1
-        fi
-    else
-        echo -e "${RED}✗ C++核心引擎编译失败${NC}"
-        exit 1
-    fi
-}
-
-# 设置Python环境
-setup_python_env() {
-    echo -e "${YELLOW}设置Python环境...${NC}"
-    
-    if [ ! -d "$PYTHON_DIR" ]; then
-        echo -e "${RED}错误: Python源码目录不存在: $PYTHON_DIR${NC}"
+    # 检查构建结果
+    local built_module=$(find . -name "arp_core_cpp*.so" -o -name "arp_core_cpp*.pyd" | head -1)
+    if [ -z "$built_module" ]; then
+        echo -e "${RED}✗ 构建失败：未找到Python模块${NC}"
         exit 1
     fi
     
-    cd "${PYTHON_DIR}"
+    # 复制到Python目录
+    echo "安装模块..."
+    cp "$built_module" "${PYTHON_DIR}/"
     
-    # 检查是否存在虚拟环境
-    if [ ! -d "venv" ]; then
-        echo "创建Python虚拟环境..."
-        python3 -m venv venv
-    fi
-    
-    # 激活虚拟环境
-    source venv/bin/activate
-    
-    # 升级pip
-    echo "升级pip..."
-    pip install --upgrade pip
-    
-    # 安装依赖
-    if [ -f "requirements.txt" ]; then
-        echo "安装Python依赖..."
-        pip install -r requirements.txt
-    else
-        echo "安装基础Python依赖..."
-        pip install pyzmq cachetools pyyaml flask flask-cors requests scapy
-    fi
-    
-    echo -e "${GREEN}✓ Python环境设置完成${NC}"
+    echo -e "${GREEN}✓ C++核心构建成功${NC}"
+    cd "${PROJECT_ROOT}"
 }
 
-# 创建配置文件 - 修复配置参数
+# 创建高性能配置文件（关闭Web功能）
 create_config() {
     echo -e "${YELLOW}创建配置文件...${NC}"
     
     mkdir -p "${CONFIG_DIR}"
     local config_file="${CONFIG_DIR}/config.yaml"
     
-    if [ ! -f "${config_file}" ]; then
-        cat > "${config_file}" << 'EOF'
-# ARP Spoofer Pro 配置文件 - 香橙派优化版
-# ==========================================
+    cat > "${config_file}" << EOF
+# ARP Spoofer C++ Core 配置文件
+# =============================
+# 香橙派高性能版本 - Web功能已关闭
+
+# 日志配置
+log_level: INFO
+log_file: "${PROJECT_ROOT}/logs/arp_spoofer.log"
 
 # 网络配置
 network:
-  interface: "wlan0"             # 香橙派网卡接口名
-  gateway_ip: "192.168.1.1"     # 网关IP
-  target_server: "192.168.1.100" # 目标服务器IP
-  target_ports: [80, 443, 8080, 801]  # 监听端口
+  interface: "${INTERFACE}"
+  gateway_ip: "192.168.1.1"  # 自动检测或手动配置
 
-# IPC通信配置
-ipc:
-  packet_address: "ipc:///tmp/arp_spoofer_packets.ipc"
-  command_address: "ipc:///tmp/arp_spoofer_commands.ipc"
-
-# 性能配置 (香橙派优化)
+# 性能配置（专为ARM优化）
 performance:
-  max_worker_threads: 8          # 香橙派4核，每核2线程
-  packet_buffer_size: 8388608    # 8MB 数据包缓冲区
-  command_timeout: 1000          # 命令超时时间(ms)
+  max_worker_threads: $(nproc)      # 使用所有CPU核心
+  packet_batch_size: 8             # ARM设备适中批次
+  packet_batch_timeout: 0.05       # 低延迟
 
-# 攻击策略
+# 攻击配置
 attack:
-  stealth_mode: false            # 隐蔽模式
-  attack_timeout: 45             # 攻击超时时间(秒)
-  max_concurrent_attacks: 20     # 最大并发攻击数 (香橙派优化)
-  cooldown_time: 3600           # 冷却时间(秒)
+  attack_timeout: 30               # 更短的超时时间
+  max_concurrent_attacks: $(( $(nproc) * 2 ))  # 核心数的2倍
+  cooldown_time: 1800              # 30分钟冷却
 
-# 缓存配置
+# 缓存配置（内存优化）
 cache:
-  arp_cache_ttl: 1800           # ARP缓存TTL(秒)
-  attack_cache_ttl: 3600        # 攻击记录TTL(秒)
-  target_info_ttl: 7200         # 目标信息TTL(秒)
+  arp_cache_ttl: 900              # 15分钟
+  attack_cache_ttl: 1800          # 30分钟
+  target_info_ttl: 3600           # 1小时
 
-# 日志配置
-logging:
-  level: "INFO"                  # 日志级别
-  file: "/var/log/arp_spoofer.log"
-  max_size: 104857600           # 100MB
-  backup_count: 5
-
-# Web API配置
-web_api:
-  enabled: true                  # 启用Web API
-  port: 8080                    # 监听端口
-  host: "0.0.0.0"              # 监听所有接口
-
-# 安全配置
-security:
-  require_root: true            # 需要root权限
-  bind_to_cpu: true            # 绑定CPU核心
-  memory_limit: 536870912      # 512MB内存限制 (香橙派优化)
+# Web API配置（关闭以提升性能）
+enable_web_api: false              # 🔥 关闭Web功能，专注性能
+web_api_port: 8080                # 保留配置但不启用
 EOF
-        
-        echo -e "${GREEN}✓ 配置文件已创建: ${config_file}${NC}"
-    else
-        echo -e "${GREEN}✓ 配置文件已存在: ${config_file}${NC}"
-    fi
+    
+    echo -e "${GREEN}✓ 高性能配置文件已创建${NC}"
+    echo -e "${BLUE}配置文件位置: ${config_file}${NC}"
 }
 
-# 创建启动脚本 - 修复hostname命令
-create_launch_script() {
-    local launcher="${PROJECT_ROOT}/scripts/launch.sh"
-    
-    cat > "${launcher}" << 'EOF'
-#!/bin/bash
-
-# ARP Spoofer Pro 启动脚本
-# ========================
-
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CPP_CORE="${PROJECT_ROOT}/cpp_core/build/arp_core"
-PYTHON_SUPERVISOR="${PROJECT_ROOT}/python_supervisor/main.py"
-CONFIG_FILE="${PROJECT_ROOT}/config/config.yaml"
-
-# 检查root权限
-if [ "$EUID" -ne 0 ]; then
-    echo "此脚本需要root权限运行"
-    echo "请使用: sudo $0 $@"
-    exit 1
-fi
-
-# 解析命令行参数
-INTERFACE=""
-DAEMON_MODE=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -i|--interface)
-            INTERFACE="$2"
-            shift 2
-            ;;
-        -d|--daemon)
-            DAEMON_MODE=true
-            shift
-            ;;
-        -h|--help)
-            echo "用法: $0 [选项]"
-            echo "选项:"
-            echo "  -i, --interface IFACE    指定网络接口"
-            echo "  -d, --daemon            以守护进程模式运行"
-            echo "  -h, --help              显示帮助信息"
-            exit 0
-            ;;
-        *)
-            echo "未知选项: $1"
-            exit 1
-            ;;
-    esac
-done
-
-# 检查接口参数
-if [ -z "$INTERFACE" ]; then
-    echo "错误: 必须指定网络接口"
-    echo "可用网络接口:"
-    ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
-    echo "使用 -h 查看帮助"
-    exit 1
-fi
-
-# 检查文件是否存在
-if [ ! -f "$CPP_CORE" ]; then
-    echo "错误: C++核心未找到: $CPP_CORE"
-    echo "请先运行构建脚本: sudo ./build.sh"
-    exit 1
-fi
-
-if [ ! -f "$PYTHON_SUPERVISOR" ]; then
-    echo "错误: Python监督者未找到: $PYTHON_SUPERVISOR"
-    exit 1
-fi
-
-# 启动函数
-start_services() {
-    echo "启动ARP Spoofer Pro..."
-    echo "接口: $INTERFACE"
-    echo "配置: $CONFIG_FILE"
-    
-    # 清理旧的IPC文件
-    rm -f /tmp/arp_spoofer_*.ipc
-    
-    # 启动C++核心
-    echo "启动C++核心引擎..."
-    if [ "$DAEMON_MODE" = true ]; then
-        nohup "$CPP_CORE" "$INTERFACE" > /var/log/arp_spoofer_core.log 2>&1 &
-        CPP_PID=$!
-        echo "C++核心PID: $CPP_PID"
-    else
-        "$CPP_CORE" "$INTERFACE" &
-        CPP_PID=$!
-    fi
-    
-    # 等待C++核心初始化
-    sleep 3
-    
-    # 启动Python监督者
-    echo "启动Python监督者..."
-    cd "${PROJECT_ROOT}/python_supervisor"
-    source venv/bin/activate
-    
-    if [ "$DAEMON_MODE" = true ]; then
-        nohup python main.py -c "$CONFIG_FILE" > /var/log/arp_spoofer_supervisor.log 2>&1 &
-        PYTHON_PID=$!
-        echo "Python监督者PID: $PYTHON_PID"
-    else
-        python main.py -c "$CONFIG_FILE" &
-        PYTHON_PID=$!
-    fi
-    
-    # 保存PID
-    echo "$CPP_PID" > /tmp/arp_spoofer_core.pid
-    echo "$PYTHON_PID" > /tmp/arp_spoofer_supervisor.pid
-    
-    if [ "$DAEMON_MODE" = true ]; then
-        echo "服务已在后台启动"
-        echo "查看日志: tail -f /var/log/arp_spoofer_*.log"
-        
-        # 获取本机IP地址
-        LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -1)
-        if [ -z "$LOCAL_IP" ]; then
-            LOCAL_IP="localhost"
-        fi
-        echo "Web API: http://${LOCAL_IP}:8080/api/status"
-    else
-        echo "服务已启动，按Ctrl+C停止"
-        wait
-    fi
+# 创建日志目录
+create_log_dir() {
+    local log_dir="${PROJECT_ROOT}/logs"
+    mkdir -p "$log_dir"
+    chmod 755 "$log_dir"
+    echo -e "${GREEN}✓ 日志目录已创建: ${log_dir}${NC}"
 }
-
-# 强力清理函数 - 根治孤儿进程
-cleanup() {
-    echo "正在停止服务..."
-    
-    # 优雅关闭 -> 强制关闭的三步策略
-    if [ -f /tmp/arp_spoofer_core.pid ]; then
-        CPP_PID=$(cat /tmp/arp_spoofer_core.pid)
-        echo "停止C++核心进程 (PID: $CPP_PID)..."
-        
-        # 第1步：优雅关闭 (SIGTERM)
-        kill -TERM "$CPP_PID" 2>/dev/null || true
-        sleep 2
-        
-        # 第2步：检查是否还存活，强制终止 (SIGKILL)
-        if kill -0 "$CPP_PID" 2>/dev/null; then
-            echo "强制终止顽固进程 $CPP_PID"
-            kill -KILL "$CPP_PID" 2>/dev/null || true
-            sleep 1
-        fi
-        
-        rm -f /tmp/arp_spoofer_core.pid
-    fi
-    
-    if [ -f /tmp/arp_spoofer_supervisor.pid ]; then
-        PYTHON_PID=$(cat /tmp/arp_spoofer_supervisor.pid)
-        echo "停止Python监督者进程 (PID: $PYTHON_PID)..."
-        
-        # 第1步：优雅关闭 (SIGTERM)
-        kill -TERM "$PYTHON_PID" 2>/dev/null || true
-        sleep 2
-        
-        # 第2步：检查是否还存活，强制终止 (SIGKILL)
-        if kill -0 "$PYTHON_PID" 2>/dev/null; then
-            echo "强制终止顽固进程 $PYTHON_PID"
-            kill -KILL "$PYTHON_PID" 2>/dev/null || true
-            sleep 1
-        fi
-        
-        rm -f /tmp/arp_spoofer_supervisor.pid
-    fi
-    
-    # 第3步：清理任何残留的相关进程
-    echo "清理残留进程..."
-    pkill -f "arp_core" 2>/dev/null || true
-    pkill -f "python.*main.py" 2>/dev/null || true
-    
-    rm -f /tmp/arp_spoofer_*.ipc
-    echo "✅ 服务已完全停止，无孤儿进程残留"
-}
-
-# 设置信号处理
-trap cleanup EXIT INT TERM
 
 # 启动服务
-start_services
-EOF
+start_service() {
+    echo -e "${YELLOW}启动ARP Spoofer C++ Core...${NC}"
     
-    chmod +x "${launcher}"
-    echo -e "${GREEN}✓ 启动脚本已创建: ${launcher}${NC}"
-}
-
-# 添加命令行参数解析
-parse_arguments() {
-    QUICK_START=false
-    FORCE_BUILD=false
+    local config_file="${CONFIG_DIR}/config.yaml"
+    local log_file="${PROJECT_ROOT}/logs/arp_spoofer.log"
     
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --quick|-q)
-                QUICK_START=true
-                shift
-                ;;
-            --force|-f)
-                FORCE_BUILD=true
-                shift
-                ;;
-            --help|-h)
-                show_help
-                exit 0
-                ;;
-            *)
-                echo "未知选项: $1"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-}
-
-# 显示帮助信息
-show_help() {
-    echo "ARP Spoofer Pro 构建和部署脚本"
-    echo ""
-    echo "用法: sudo $0 [选项]"
-    echo ""
-    echo "选项:"
-    echo "  -q, --quick    快速启动模式 (自动构建并运行)"
-    echo "  -f, --force    强制重新构建"
-    echo "  -h, --help     显示帮助信息"
-    echo ""
-    echo "示例:"
-    echo "  sudo $0 --quick    # 一键构建并启动"
-    echo "  sudo $0 --force    # 强制重新构建"
-    echo "  sudo $0            # 交互式构建"
-}
-
-# 检查是否需要构建
-need_build() {
-    if [ "$FORCE_BUILD" = true ]; then
-        return 0  # 需要构建
-    fi
+    # 创建日志目录
+    create_log_dir
     
-    # 检查C++可执行文件是否存在
-    if [ ! -f "${BUILD_DIR}/arp_core" ]; then
-        return 0  # 需要构建
-    fi
+    # 清理旧的进程
+    cleanup_old_processes
     
-    # 检查Python虚拟环境是否存在
-    if [ ! -d "${PYTHON_DIR}/venv" ]; then
-        return 0  # 需要构建
-    fi
+    # 进入Python目录
+    cd "${PYTHON_DIR}"
     
-    # 检查配置文件是否存在
-    if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
-        return 0  # 需要构建
-    fi
-    
-    return 1  # 不需要构建
-}
-
-# 运行模式选择
-run_mode_selection() {
-    if [ "$QUICK_START" = true ]; then
-        echo -e "${BLUE}快速启动模式激活${NC}"
-        quick_start
-        return
-    fi
-    
-    echo -e "${YELLOW}选择运行模式:${NC}"
-    echo "1. 仅构建 (编译完成后退出)"
-    echo "2. 构建并交互运行 (前台运行，显示日志)"
-    echo "3. 构建并后台运行 (守护进程模式)"
-    echo "4. 快速启动 (自动检测网络接口并运行)"
-    echo ""
-    read -p "请选择 (1-4): " -n 1 -r
-    echo
-    
-    case $REPLY in
-        1)
-            echo -e "${GREEN}构建完成！${NC}"
-            echo -e "${BLUE}使用以下命令运行:${NC}"
-            echo "sudo ${PROJECT_ROOT}/scripts/launch.sh -i <interface>"
-            echo ""
-            echo "可用网络接口:"
-            ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
-            ;;
-        2)
-            interactive_run
-            ;;
-        3)
-            daemon_run
-            ;;
-        4)
-            quick_start
-            ;;
-        *)
-            echo "无效选择，默认为仅构建模式"
-            echo -e "${BLUE}使用以下命令运行:${NC}"
-            echo "sudo ${PROJECT_ROOT}/scripts/launch.sh -i <interface>"
-            ;;
-    esac
-}
-
-# 快速启动模式
-quick_start() {
-    echo -e "${YELLOW}快速启动模式...${NC}"
-    
-    # 检查root权限
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}错误: 需要root权限运行${NC}"
-        echo "请使用: sudo $0"
+    # 检查C++模块
+    if ! python3 -c "import arp_core_cpp" 2>/dev/null; then
+        echo -e "${RED}✗ C++模块加载失败${NC}"
+        echo "请检查构建是否成功"
         exit 1
     fi
     
-    # 自动检测网络接口
-    echo "检测网络接口..."
-    INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    echo -e "${GREEN}✓ C++模块加载成功${NC}"
+    echo -e "${BLUE}网络接口: ${INTERFACE}${NC}"
+    echo -e "${BLUE}配置文件: ${config_file}${NC}"
+    echo -e "${BLUE}日志文件: ${log_file}${NC}"
+    echo ""
     
-    if [ -z "$INTERFACE" ]; then
-        echo "无法自动检测网络接口，请手动选择:"
-        ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
+    # 启动服务
+    if [ "$DAEMON_MODE" = true ]; then
+        echo -e "${BLUE}启动后台服务...${NC}"
+        nohup python3 main.py -c "$config_file" --log-level INFO > "$log_file" 2>&1 &
+        local pid=$!
+        echo "$pid" > /tmp/arp_spoofer.pid
+        
+        echo -e "${GREEN}✓ 服务已在后台启动 (PID: $pid)${NC}"
         echo ""
-        read -p "请输入网络接口名: " INTERFACE
+        echo "管理命令:"
+        echo "  查看日志: tail -f $log_file"
+        echo "  停止服务: sudo kill $pid"
+        echo "  检查状态: ps aux | grep $pid"
+        
+        # 等待几秒检查启动状态
+        sleep 3
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "${GREEN}✓ 服务运行正常${NC}"
+        else
+            echo -e "${RED}✗ 服务启动失败，请检查日志${NC}"
+            exit 1
+        fi
     else
-        echo -e "${GREEN}自动检测到默认网络接口: $INTERFACE${NC}"
+        echo -e "${BLUE}启动前台服务...${NC}"
+        echo "按 Ctrl+C 停止服务"
+        echo ""
+        
+        # 设置信号处理
+        trap cleanup_and_exit INT TERM
+        
+        # 前台运行
+        python3 main.py -c "$config_file" --log-level INFO
     fi
-    
-    if [ -z "$INTERFACE" ]; then
-        echo -e "${RED}错误: 必须指定网络接口${NC}"
-        exit 1
-    fi
-    
-    # 获取本机IP地址
-    LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -1)
-    if [ -z "$LOCAL_IP" ]; then
-        LOCAL_IP="localhost"
-    fi
-    
-    echo -e "${BLUE}即将启动ARP Spoofer Pro...${NC}"
-    echo "网络接口: $INTERFACE"
-    echo "Web API将在: http://${LOCAL_IP}:8080"
-    echo ""
-    
-    # 直接运行启动脚本
-    "${PROJECT_ROOT}/scripts/launch.sh" -i "$INTERFACE"
 }
 
-# 交互运行模式
-interactive_run() {
-    echo -e "${YELLOW}启动交互模式...${NC}"
+# 清理旧进程
+cleanup_old_processes() {
+    echo -e "${YELLOW}清理旧进程...${NC}"
     
-    # 检查root权限
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}错误: 需要root权限运行${NC}"
-        echo "请使用: sudo $0"
-        exit 1
+    # 查找并终止旧的进程
+    if [ -f /tmp/arp_spoofer.pid ]; then
+        local old_pid=$(cat /tmp/arp_spoofer.pid)
+        if kill -0 "$old_pid" 2>/dev/null; then
+            echo "终止旧进程 (PID: $old_pid)..."
+            kill -TERM "$old_pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$old_pid" 2>/dev/null || true
+        fi
+        rm -f /tmp/arp_spoofer.pid
     fi
     
-    # 检查网络接口
-    echo "可用网络接口:"
-    ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
-    echo ""
-    read -p "请输入网络接口名 (例如: eth0): " INTERFACE
+    # 清理任何残留进程
+    pkill -f "python.*main.py" 2>/dev/null || true
     
-    if [ -z "$INTERFACE" ]; then
-        echo -e "${RED}错误: 必须指定网络接口${NC}"
-        exit 1
-    fi
-    
-    # 直接运行启动脚本
-    "${PROJECT_ROOT}/scripts/launch.sh" -i "$INTERFACE"
+    echo -e "${GREEN}✓ 旧进程已清理${NC}"
 }
 
-# 守护进程运行
-daemon_run() {
-    echo -e "${YELLOW}启动守护进程模式...${NC}"
-    
-    # 检查root权限
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}错误: 需要root权限运行${NC}"
-        echo "请使用: sudo $0"
-        exit 1
-    fi
-    
-    # 显示可用网络接口
-    echo "可用网络接口:"
-    ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//'
+# 清理并退出
+cleanup_and_exit() {
     echo ""
-    read -p "请输入网络接口名 (例如: eth0): " INTERFACE
-    
-    if [ -z "$INTERFACE" ]; then
-        echo -e "${RED}错误: 必须指定网络接口${NC}"
-        exit 1
-    fi
-    
-    # 以守护进程模式启动
-    "${PROJECT_ROOT}/scripts/launch.sh" -i "$INTERFACE" -d
+    echo -e "${YELLOW}正在停止服务...${NC}"
+    cleanup_old_processes
+    echo -e "${GREEN}✓ 服务已停止${NC}"
+    exit 0
 }
 
 # 主函数
 main() {
+    echo -e "${BLUE}ARP Spoofer C++ Core - 香橙派一键部署脚本${NC}"
+    echo ""
+    
     # 解析命令行参数
     parse_arguments "$@"
     
-    # 检查项目目录结构
+    # 基础检查
+    check_root
+    check_interface
+    
+    # 检查项目结构
     if [ ! -d "$CPP_DIR" ] || [ ! -d "$PYTHON_DIR" ]; then
         echo -e "${RED}错误: 项目目录结构不完整${NC}"
-        echo "CPP目录: $CPP_DIR"
+        echo "C++目录: $CPP_DIR"
         echo "Python目录: $PYTHON_DIR"
         exit 1
     fi
     
-    # 检查是否需要构建
+    # 构建流程
     if need_build; then
-        echo -e "${YELLOW}需要构建项目...${NC}"
-        
-        # 执行构建步骤
+        echo -e "${BLUE}开始构建流程...${NC}"
         check_dependencies
         build_cpp_core
-        setup_python_env
         create_config
-        create_launch_script
-        
-        echo -e "${GREEN}========================================${NC}"
-        echo -e "${GREEN}  构建完成！${NC}"
-        echo -e "${GREEN}========================================${NC}"
+        echo -e "${GREEN}✓ 构建完成${NC}"
         echo ""
     else
-        echo -e "${GREEN}项目已构建，跳过构建步骤${NC}"
-        create_launch_script  # 确保启动脚本是最新的
+        echo -e "${GREEN}✓ 跳过构建，使用现有版本${NC}"
+        create_config  # 确保配置是最新的
         echo ""
     fi
     
-    # 运行模式选择
-    run_mode_selection
+    # 启动服务
+    start_service
 }
 
 # 运行主函数

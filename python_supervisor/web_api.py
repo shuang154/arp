@@ -11,10 +11,10 @@ from flask_cors import CORS
 from typing import Dict, Any
 
 class WebAPI:
-    """Web API服务器"""
+    """Web API服务器 - 适配C++核心"""
     
-    def __init__(self, state_cache, config):
-        self.state_cache = state_cache
+    def __init__(self, supervisor, config):
+        self.supervisor = supervisor  # PythonSupervisor实例
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.app = Flask(__name__)
@@ -32,13 +32,14 @@ class WebAPI:
         def get_status():
             """获取系统状态"""
             try:
-                stats = self.state_cache.get_statistics()
-                return jsonify({
-                    'status': 'running',
-                    'statistics': stats,
-                    'active_attacks': len(self.state_cache.get_active_attacks()),
-                    'successful_attacks': len(self.state_cache.get_successful_attacks())
-                })
+                if self.supervisor:
+                    stats = self.supervisor.get_statistics()
+                    return jsonify({
+                        'status': 'running' if self.supervisor.running else 'stopped',
+                        'statistics': stats
+                    })
+                else:
+                    return jsonify({'error': 'Supervisor not available'}), 500
             except Exception as e:
                 self.logger.error(f"Status API error: {e}")
                 return jsonify({'error': str(e)}), 500
@@ -47,20 +48,12 @@ class WebAPI:
         def get_attacks():
             """获取攻击信息"""
             try:
-                return jsonify({
-                    'active_attacks': self.state_cache.get_active_attacks(),
-                    'successful_attacks': self.state_cache.get_successful_attacks(),
-                    'attack_sessions': [
-                        {
-                            'target_ip': session.target_ip,
-                            'start_time': session.start_time,
-                            'duration': session.duration,
-                            'attack_type': session.attack_type,
-                            'status': session.status
-                        }
-                        for session in self.state_cache.get_attack_sessions().values()
-                    ]
-                })
+                if self.supervisor and self.supervisor.cpp_processor:
+                    active_attacks = self.supervisor.cpp_processor.get_active_attacks()
+                    return jsonify({
+                        'active_attacks': active_attacks,
+                        'count': len(active_attacks)
+                    })
             except Exception as e:
                 self.logger.error(f"Attacks API error: {e}")
                 return jsonify({'error': str(e)}), 500
@@ -69,7 +62,16 @@ class WebAPI:
         def get_cache_info():
             """获取缓存信息"""
             try:
-                return jsonify(self.state_cache.get_statistics())
+                if self.supervisor and self.supervisor.cpp_processor:
+                    # 从C++核心获取缓存统计
+                    stats = self.supervisor.cpp_processor.get_statistics()
+                    return jsonify({
+                        'cache_hits': stats.cache_hits,
+                        'cache_misses': stats.cache_misses,
+                        'hit_rate': stats.hit_rate
+                    })
+                else:
+                    return jsonify({'error': 'C++ processor not available'}), 500
             except Exception as e:
                 self.logger.error(f"Cache API error: {e}")
                 return jsonify({'error': str(e)}), 500
