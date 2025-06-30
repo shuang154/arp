@@ -20,12 +20,19 @@ private:
     std::atomic<uint64_t> packets_dropped_;
     
 public:
-    PacketSniffer(const std::string& interface, IPCManager* ipc);
+    PacketSniffer(const std::string& interface, IPCManager* ipc = nullptr);
+    PacketSniffer(const std::string& interface);  // 仅interface构造函数用于Python绑定
     ~PacketSniffer();
     
     bool initialize();
     void start_sniffing();
     void stop();
+    
+    // 新增：简化接口，用于Python绑定
+    bool start_capture() { start_sniffing(); return true; }
+    bool stop_capture() { stop(); return true; }
+    uint64_t get_packet_count() const { return packets_captured_; }
+    uint64_t get_arp_packet_count() const { return packets_captured_; } // 简化版本
     
     // 静态回调函数
     static void packet_handler(u_char* user, const struct pcap_pkthdr* header, 

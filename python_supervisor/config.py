@@ -12,9 +12,9 @@ from typing import List, Dict, Any, Optional
 @dataclass
 class NetworkConfig:
     """网络配置"""
-    interface: str = "wlan0"
-    gateway_ip: str = "10.17.0.1"  # ★【修复】★ 根据temporary.txt中的IP段修改
-    target_server: str = "121.248.150.37"  # ★【修复】★ 校园网认证服务器
+    interface: str = "wlan0"  # 你的实际无线网卡
+    gateway_ip: str = "10.17.0.1"  # 你的实际网关IP
+    target_server: str = "121.248.150.37"  # 校园网认证服务器
     target_ports: List[int] = field(default_factory=lambda: [80, 443, 8080, 801])  # 包含801端口
 
 @dataclass
@@ -42,6 +42,7 @@ class AttackConfig:
     attack_timeout: int = 45  # seconds
     max_concurrent_attacks: int = 12  # 🔧 提升到12个以配合8线程
     cooldown_time: int = 3600  # seconds
+    attack_frequency: int = 10  # 🔧 每秒攻击包数，与build.sh生成的YAML兼容
 
 @dataclass
 class CacheConfig:
@@ -202,6 +203,7 @@ class Config:
                 config.attack.attack_timeout = attack_config.get('attack_timeout', config.attack.attack_timeout)
                 config.attack.max_concurrent_attacks = attack_config.get('max_concurrent_attacks', config.attack.max_concurrent_attacks)
                 config.attack.cooldown_time = attack_config.get('cooldown_time', config.attack.cooldown_time)
+                config.attack.attack_frequency = attack_config.get('attack_frequency', config.attack.attack_frequency)  # 🔧 支持攻击频率配置
             
             if 'cache' in yaml_data:
                 cache_config = yaml_data['cache']
@@ -261,7 +263,8 @@ class Config:
                 'stealth_mode': self.attack.stealth_mode,
                 'attack_timeout': self.attack.attack_timeout,
                 'max_concurrent_attacks': self.attack.max_concurrent_attacks,
-                'cooldown_time': self.attack.cooldown_time
+                'cooldown_time': self.attack.cooldown_time,
+                'attack_frequency': self.attack.attack_frequency  # 🔧 保存攻击频率
             },
             'cache': {
                 'arp_cache_ttl': self.cache.arp_cache_ttl,

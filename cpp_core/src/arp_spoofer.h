@@ -8,6 +8,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include "thread_pool.h"  // 集成高性能线程池
 
 // ARP欺骗会话信息
 struct SpoofSession {
@@ -25,6 +26,9 @@ class ARPSpoofer {
 private:
     std::string interface_;
     int raw_socket_;
+    
+    // 高性能线程池 - 每个线程攻击一组IP
+    std::unique_ptr<HighPerformanceThreadPool> thread_pool_;
     
     // 活跃的欺骗会话
     std::unordered_map<std::string, std::unique_ptr<SpoofSession>> active_sessions_;
@@ -59,6 +63,10 @@ public:
     
     // 获取活跃会话信息
     std::vector<std::string> get_active_targets() const;
+    
+    // 获取线程池统计信息
+    std::vector<size_t> get_thread_pool_queue_sizes() const;
+    double get_thread_pool_completion_rate() const;
 
 private:
     // 创建原始套接字
@@ -71,6 +79,10 @@ private:
     
     // 欺骗线程函数
     void spoof_thread_func(const std::string& target_ip);
+    
+    // 线程池任务函数 - 每个线程专门处理一组IP
+    void spoof_task_func(const std::string& target_ip, const std::string& gateway_ip,
+                         const std::string& target_mac, const std::string& gateway_mac);
     
     // 获取本机MAC地址
     std::string get_interface_mac();

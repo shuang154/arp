@@ -1,9 +1,17 @@
 #!/bin/bash
 
-# ARP Spoofer C++ Core - 香橙派一键部署脚本
+# ARP Spoofer C++ Core - 一体化部署脚本
 # =============================================
-# 功能：构建、配置、启动（单一脚本完成所有操作）
-# 优化：关闭Web功能，专注核心性能
+# 🚀 功能：一键完成所有部署操作，无需其他脚本
+#    - 自动检测和安装依赖（libpcap、pybind11等）
+#    - 自动编译C++高性能核心模块
+#    - 自动生成和配置YAML配置文件
+#    - 自动启动Python监督者
+# 🔧 优化：关闭Web功能，专注核心性能
+# 📋 配置：所有参数以生成的config.yaml为准
+# 
+# 注意：deployment_check.sh仅为可选的快速检查工具，
+#       本脚本已包含完整的依赖检测和自动安装功能
 
 set -e  # 遇到错误立即退出
 
@@ -16,7 +24,7 @@ NC='\033[0m' # No Color
 
 # 项目路径配置
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CPP_DIR="${PROJECT_ROOT}/cpp_core_v2"  # 修正：使用v2版本
+CPP_DIR="${PROJECT_ROOT}/cpp_core"        # 🔧 改回使用原版cpp_core（已有真实网络功能）
 PYTHON_DIR="${PROJECT_ROOT}/python_supervisor"
 BUILD_DIR="${CPP_DIR}/build"
 CONFIG_DIR="${PROJECT_ROOT}/config"
@@ -35,7 +43,10 @@ CLEAN_VENV=false
 
 # 显示帮助信息
 show_help() {
-    echo "ARP Spoofer C++ Core - 一键部署脚本"
+    echo "ARP Spoofer C++ Core - 一体化部署脚本"
+    echo ""
+    echo "🚀 功能：自动检测依赖→编译C++核心→生成YAML配置→启动系统"
+    echo "📋 配置：所有参数以生成的config.yaml为准（无需额外配置）"
     echo ""
     echo "用法: sudo $0 [选项]"
     echo ""
@@ -47,7 +58,7 @@ show_help() {
     echo "  -h, --help            显示帮助信息"
     echo ""
     echo "示例:"
-    echo "  sudo $0               # 交互式选择网络接口"
+    echo "  sudo $0               # 交互式选择网络接口，一键部署"
     echo "  sudo $0 -i eth0       # 直接指定eth0接口"
     echo "  sudo $0 -i wlan0 -d   # 在wlan0接口上后台运行"
     echo "  sudo $0 -c            # 清理虚拟环境并重新创建"
@@ -375,38 +386,81 @@ create_config() {
     cat > "${config_file}" << EOF
 # ARP Spoofer C++ Core 配置文件
 # =============================
-# 香橙派高性能版本 - Web功能已关闭
+# 🔥 主配置文件 - 所有参数以此YAML为准！
+# 高性能多线程真实网络版本 - 专为消除Python GIL和锁竞争设计
+# 特点：
+# 1. 每个线程攻击一组IP，完全无锁设计
+# 2. 真实网络数据包捕获和攻击，无任何模拟
+# 3. C++高性能实现，系统效率远超Python版本
+# 4. Web功能已关闭，专注核心攻击性能
+# 5. 所有配置在此文件中管理，无需额外配置
 
-# 日志配置
-log_level: INFO
-log_file: "${PROJECT_ROOT}/logs/arp_spoofer.log"
+# 🔧 日志配置
+logging:
+  level: INFO
+  file: "${PROJECT_ROOT}/logs/arp_spoofer.log"
+  max_size: 104857600      # 100MB
+  backup_count: 5
 
-# 网络配置
+# 🌐 网络配置
 network:
   interface: "${INTERFACE}"
-  gateway_ip: "192.168.1.1"  # 自动检测或手动配置
+  gateway_ip: "10.17.0.1"  # 🔧 请根据你的网络修改
+  target_server: "httpbin.org"
+  target_ports: [80, 443]
 
-# 性能配置（专为ARM优化）
+# 📡 IPC通信配置
+ipc:
+  packet_address: "tcp://127.0.0.1:5555"
+  command_address: "tcp://127.0.0.1:5556"
+
+# ⚡ 性能配置（专为ARM优化）
 performance:
   max_worker_threads: $(nproc)      # 使用所有CPU核心
+  packet_buffer_size: 2048
+  command_timeout: 10
   packet_batch_size: 8             # ARM设备适中批次
   packet_batch_timeout: 0.05       # 低延迟
+  zmq_rcv_hwm: 15000              # 接收缓冲区
+  zmq_snd_hwm: 1500               # 发送缓冲区
+  
+  # 🔧 线程池配置（消除锁竞争）
+  thread_pool_enabled: true        # 启用高性能线程池
+  per_thread_queue_size: 1000      # 每线程队列大小
+  ip_hash_distribution: true       # IP哈希分配，确保同一IP总是在同一线程
 
-# 攻击配置
+# 🎯 攻击配置
 attack:
+  stealth_mode: false             # 高性能模式，不隐藏
   attack_timeout: 30               # 更短的超时时间
   max_concurrent_attacks: $(( $(nproc) * 2 ))  # 核心数的2倍
   cooldown_time: 1800              # 30分钟冷却
+  attack_frequency: 10             # 每秒攻击包数（高频攻击）
 
-# 缓存配置（内存优化）
+# 💾 缓存配置（内存优化）
 cache:
   arp_cache_ttl: 900              # 15分钟
   attack_cache_ttl: 1800          # 30分钟
   target_info_ttl: 3600           # 1小时
 
-# Web API配置（关闭以提升性能）
-enable_web_api: false              # 🔥 关闭Web功能，专注性能
-web_api_port: 8080                # 保留配置但不启用
+# 🌐 Web API配置（高性能模式已关闭）
+web_api:
+  enabled: false                  # 🔥 关闭Web功能，专注性能
+  port: 8080                      # 保留配置但不启用
+  host: "0.0.0.0"
+
+# 🔒 安全配置
+security:
+  require_root: true              # 需要root权限进行网络操作
+  bind_to_cpu: true              # 绑定CPU获得更好性能
+  memory_limit: 536870912        # 512MB内存限制
+
+# 🔧 真实网络设置（无模拟数据）
+real_network:
+  packet_capture: true             # 真实数据包捕获
+  arp_spoofing: true              # 真实ARP欺骗攻击
+  network_monitoring: true         # 真实网络监控
+  simulate_mode: false            # 🚫 禁用所有模拟模式
 EOF
     
     echo -e "${GREEN}✓ 高性能配置文件已创建${NC}"
@@ -518,7 +572,11 @@ cleanup_and_exit() {
 
 # 主函数
 main() {
-    echo -e "${BLUE}ARP Spoofer C++ Core - 香橙派一键部署脚本${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE} ARP Spoofer C++ Core - 一体化部署${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${GREEN}🚀 自动检测依赖 → 编译C++核心 → 生成YAML → 启动系统${NC}"
+    echo -e "${YELLOW}📋 所有配置以生成的config.yaml为准，无需额外配置${NC}"
     echo ""
     
     # 解析命令行参数
