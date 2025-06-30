@@ -51,6 +51,11 @@ class PythonSupervisor:
         self.config = config
         self.running = False
         
+        # 首先设置日志
+        self._setup_logging()
+        
+        self.logger.info("🔧 Initializing PythonSupervisor...")
+        
         # C++核心处理器
         self.cpp_processor = None
         
@@ -73,9 +78,6 @@ class PythonSupervisor:
             'python_uptime': 0,
             'last_cpp_stats': None
         }
-        
-        # 设置日志
-        self._setup_logging()
         
     def _setup_logging(self):
         """设置日志系统"""
@@ -308,14 +310,14 @@ def signal_handler(signum, frame):
 
 def main():
     """主函数"""
-    # 解析命令行参数
-    args = parse_arguments()
-    
-    # 设置信号处理
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     try:
+        # 解析命令行参数
+        args = parse_arguments()
+        
+        # 设置信号处理
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    
         # 加载配置
         config = Config.load_from_file(args.config)
         
@@ -328,16 +330,21 @@ def main():
             config.web_api_port = args.web_port
             
         # 创建并运行监督者
+        print("🔧 Creating PythonSupervisor...")
         supervisor = PythonSupervisor(config)
         
+        print("🔧 Initializing supervisor...")
         if supervisor.initialize():
+            print("🚀 Running supervisor...")
             supervisor.run()
         else:
-            print("Failed to initialize supervisor")
+            print("❌ Failed to initialize supervisor")
             sys.exit(1)
             
     except Exception as e:
         print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":

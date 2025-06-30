@@ -51,6 +51,7 @@ class CacheConfig:
     target_info_ttl: int = 7200  # seconds
 
 @dataclass
+@dataclass
 class LoggingConfig:
     """日志配置"""
     level: str = "INFO"
