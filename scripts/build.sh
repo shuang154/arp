@@ -232,10 +232,25 @@ check_dependencies() {
 # 自动安装依赖
 auto_install_deps() {
     echo -e "${YELLOW}自动安装依赖...${NC}"
-    
+
     if command -v pacman >/dev/null 2>&1; then
         # Arch Linux
-        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config
+        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config || {
+            echo -e "${RED}部分依赖安装失败，检测是否为 externally-managed-environment...${NC}"
+            if python -m ensurepip --version >/dev/null 2>&1; then
+                echo -e "${YELLOW}创建虚拟环境并安装缺失依赖...${NC}"
+                python -m venv venv
+                source venv/bin/activate
+                pip install pybind11 || {
+                    echo -e "${RED}pip 安装失败，请手动安装 pybind11 或使用 AUR 工具（如 yay）安装 python-pybind11${NC}"
+                    exit 1
+                }
+                deactivate
+            else
+                echo -e "${RED}无法创建虚拟环境，请手动安装 pybind11 或使用 AUR 工具（如 yay）安装 python-pybind11${NC}"
+                exit 1
+            fi
+        }
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu/Debian
         apt-get update
@@ -247,9 +262,6 @@ auto_install_deps() {
         echo -e "${RED}无法识别的包管理器，请手动安装依赖${NC}"
         exit 1
     fi
-    
-    # 安装pybind11
-    pip3 install pybind11
 }
 
 # 检查是否需要构建
