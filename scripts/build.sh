@@ -349,12 +349,31 @@ build_cpp_core() {
     
     cd "${BUILD_DIR}"
     
+    # 🔧 智能选择Python解释器（优先使用虚拟环境）
+    local python_executable=$(which python3)
+    local venv_path="${PROJECT_ROOT}/venv"
+    
+    if [ -f "${venv_path}/bin/python3" ]; then
+        echo -e "${GREEN}✓ 发现虚拟环境，使用venv中的Python${NC}"
+        python_executable="${venv_path}/bin/python3"
+        
+        # 验证pybind11是否在虚拟环境中可用
+        if "${python_executable}" -c "import pybind11" 2>/dev/null; then
+            echo -e "${GREEN}✓ 虚拟环境中pybind11可用${NC}"
+        else
+            echo -e "${RED}✗ 虚拟环境中pybind11不可用${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}使用系统Python: ${python_executable}${NC}"
+    fi
+    
     # 配置CMake（ARM优化）
     echo "配置CMake..."
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=17 \
-        -DPYTHON_EXECUTABLE=$(which python3)
+        -DPYTHON_EXECUTABLE="${python_executable}"
     
     # 编译（使用所有CPU核心）
     local cpu_cores=$(nproc)

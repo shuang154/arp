@@ -45,6 +45,7 @@ try:
     # 🔧 检查关键类是否存在
     required_classes = ['ARPSpoofer', 'PacketSniffer', 'ThreadPool']
     missing_classes = []
+    
     for cls_name in required_classes:
         if not hasattr(arp_core_cpp, cls_name):
             missing_classes.append(cls_name)
@@ -53,16 +54,10 @@ try:
     
     if missing_classes:
         print(f"❌ Missing required classes: {missing_classes}")
-        print("This indicates a C++ compilation or binding issue.")
-        print("\n🔧 Possible solutions:")
-        print("1. Rebuild the C++ module:")
-        print("   cd cpp_core && rm -rf build && mkdir build && cd build")
-        print("   cmake .. && make clean && make -j$(nproc)")
-        print("2. Check if all source files are present and compiling")
-        print("3. Verify pybind11 is installed: pip install pybind11")
-        print("4. Run the diagnostic script: python test_cpp_module.py")
-        print(f"\n📋 Available classes in module: {module_attrs}")
-        print("\n⚠️ Falling back to Python implementation...")
+        print("� Clear build cache and rebuild:")
+        print("   cd cpp_core && rm -rf build/ && find . -name '*.so' -delete")
+        print("   cd ../scripts && ./build.sh")
+        print("\n⚠️ Using Python fallback for now...")
         USE_FALLBACK = True
     else:
         CPP_MODULE_AVAILABLE = True
