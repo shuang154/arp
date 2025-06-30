@@ -21,7 +21,6 @@ private:
     
 public:
     PacketSniffer(const std::string& interface, IPCManager* ipc = nullptr);
-    PacketSniffer(const std::string& interface);  // 仅interface构造函数用于Python绑定
     ~PacketSniffer();
     
     bool initialize();

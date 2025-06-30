@@ -7,8 +7,14 @@ HighPerformanceThreadPool::HighPerformanceThreadPool(size_t num_threads)
     
     // 为每个线程创建独立的队列和同步对象
     thread_queues_.resize(num_threads_);
-    queue_mutexes_.resize(num_threads_);
-    queue_conditions_.resize(num_threads_);
+    queue_mutexes_.reserve(num_threads_);
+    queue_conditions_.reserve(num_threads_);
+    
+    // 创建智能指针来管理mutex和condition_variable
+    for (size_t i = 0; i < num_threads_; ++i) {
+        queue_mutexes_.emplace_back(std::make_unique<std::mutex>());
+        queue_conditions_.emplace_back(std::make_unique<std::condition_variable>());
+    }
     
     std::cout << "🚀 创建高性能线程池，线程数: " << num_threads_ << std::endl;
 }
@@ -42,7 +48,7 @@ void HighPerformanceThreadPool::stop() {
     
     // 通知所有线程停止
     for (size_t i = 0; i < num_threads_; ++i) {
-        queue_conditions_[i].notify_all();
+        queue_conditions_[i]->notify_all();
     }
     
     // 等待所有线程结束
@@ -70,13 +76,13 @@ bool HighPerformanceThreadPool::assign_ip_task(const std::string& target_ip, IPT
     size_t thread_id = hash_ip_to_thread(target_ip);
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutexes_[thread_id]);
+        std::lock_guard<std::mutex> lock(*queue_mutexes_[thread_id]);
         thread_queues_[thread_id].emplace([task, target_ip]() {
             task(target_ip);
         });
     }
     
-    queue_conditions_[thread_id].notify_one();
+    queue_conditions_[thread_id]->notify_one();
     tasks_assigned_.fetch_add(1);
     
     return true;
@@ -92,7 +98,7 @@ bool HighPerformanceThreadPool::assign_task(Task task) {
     size_t best_thread = 0;
     
     for (size_t i = 0; i < num_threads_; ++i) {
-        std::lock_guard<std::mutex> lock(queue_mutexes_[i]);
+        std::lock_guard<std::mutex> lock(*queue_mutexes_[i]);
         if (thread_queues_[i].size() < min_queue_size) {
             min_queue_size = thread_queues_[i].size();
             best_thread = i;
@@ -100,11 +106,11 @@ bool HighPerformanceThreadPool::assign_task(Task task) {
     }
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutexes_[best_thread]);
+        std::lock_guard<std::mutex> lock(*queue_mutexes_[best_thread]);
         thread_queues_[best_thread].emplace(std::move(task));
     }
     
-    queue_conditions_[best_thread].notify_one();
+    queue_conditions_[best_thread]->notify_one();
     tasks_assigned_.fetch_add(1);
     
     return true;
@@ -123,7 +129,7 @@ std::vector<size_t> HighPerformanceThreadPool::get_queue_sizes() const {
     sizes.reserve(num_threads_);
     
     for (size_t i = 0; i < num_threads_; ++i) {
-        std::lock_guard<std::mutex> lock(queue_mutexes_[i]);
+        std::lock_guard<std::mutex> lock(*queue_mutexes_[i]);
         sizes.push_back(thread_queues_[i].size());
     }
     
@@ -138,8 +144,8 @@ void HighPerformanceThreadPool::worker_thread(size_t thread_id) {
         bool has_task = false;
         
         {
-            std::unique_lock<std::mutex> lock(queue_mutexes_[thread_id]);
-            queue_conditions_[thread_id].wait(lock, [this, thread_id] {
+            std::unique_lock<std::mutex> lock(*queue_mutexes_[thread_id]);
+            queue_conditions_[thread_id]->wait(lock, [this, thread_id] {
                 return !thread_queues_[thread_id].empty() || !running_.load();
             });
             

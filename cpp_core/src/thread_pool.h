@@ -8,6 +8,7 @@
 #include <atomic>
 #include <functional>
 #include <future>
+#include <memory>
 
 /**
  * 高性能线程池 - 消除锁竞争，优化IP攻击分配
@@ -21,8 +22,8 @@ public:
 private:
     std::vector<std::thread> workers_;
     std::vector<std::queue<Task>> thread_queues_;  // 每个线程一个队列，减少锁竞争
-    std::vector<std::mutex> queue_mutexes_;        // 每个队列一个锁
-    std::vector<std::condition_variable> queue_conditions_;
+    std::vector<std::unique_ptr<std::mutex>> queue_mutexes_;        // 使用智能指针避免移动构造问题
+    std::vector<std::unique_ptr<std::condition_variable>> queue_conditions_;
     
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> tasks_completed_{0};
