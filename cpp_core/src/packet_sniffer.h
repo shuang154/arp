@@ -24,6 +24,7 @@ public:
     ~PacketSniffer();
     
     bool initialize();
+    bool initialize_with_ipc(const std::string& packet_addr, const std::string& command_addr);
     void start_sniffing();
     void stop();
     

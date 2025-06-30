@@ -428,7 +428,7 @@ network:
   target_server: "httpbin.org"
   target_ports: [80, 443]
 
-# 📡 IPC通信配置
+# 📡 IPC通信配置 (修正版本 - 统一使用TCP)
 ipc:
   packet_address: "tcp://127.0.0.1:5555"
   command_address: "tcp://127.0.0.1:5556"

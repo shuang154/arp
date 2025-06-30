@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-ARP Spoofer Python Supervisor v3.0 - C++ Core Integration
-==========================================================
+ARP Spoofer Python Supervisor v3.0 - C++ Core Integration (Fixed)
+=================================================================
 职责：
 1. 启动和管理C++高性能核心处理器
-2. 提供Web API和监控接口
-3. 配置管理和日志记录
-4. 统计信息收集和展示
+2. 接收和处理C++核心发送的数据包
+3. 提供Web API和监控接口
+4. 配置管理和日志记录
+5. 统计信息收集和展示
 
 核心处理完全由C++负责，解决GIL限制和锁竞争问题
+修复：添加了完整的C++→Python数据包接收器
 """
 
 import time
@@ -18,6 +20,8 @@ import argparse
 import signal
 import sys
 import yaml
+import json
+import zmq  # ★ 关键修正：导入ZMQ
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -77,6 +81,9 @@ if USE_FALLBACK:
     print("📦 Python fallback implementation loaded")
 
 from config import Config
+from packet_analyzer import PacketAnalyzer      # ★ 关键修正：导入分析器
+from attack_coordinator import AttackCoordinator  # ★ 关键修正：导入协调器
+from state_cache import StateCache              # ★ 关键修正：导入状态缓存
 
 # Web API 可选导入（性能优化：关闭Web功能）
 try:
@@ -89,7 +96,7 @@ except ImportError:
     WebAPI = None
 
 class PythonSupervisor:
-    """简化的Python监督者 - 主要负责启动C++核心和提供接口"""
+    """修正的Python监督者 - 现在包含完整的C++→Python数据桥梁"""
     
     def __init__(self, config: Config):
         self.config = config
@@ -98,10 +105,22 @@ class PythonSupervisor:
         # 首先设置日志
         self._setup_logging()
         
-        self.logger.info("🔧 Initializing PythonSupervisor...")
+        self.logger.info("🔧 Initializing PythonSupervisor (Fixed Version)...")
+        
+        # ★ 关键修正：初始化ZMQ上下文和套接字
+        self.zmq_context = zmq.Context()
+        self.packet_receiver_socket = None
+        self.command_sender_socket = None
+        self.packet_receiver_thread = None
+        
+        # ★ 关键修正：初始化分析和协调组件
+        self.state_cache = StateCache()
+        self.packet_analyzer = PacketAnalyzer(config)
+        self.attack_coordinator = AttackCoordinator(config, self.state_cache)
         
         # C++核心处理器
-        self.cpp_processor = None
+        self.arp_spoofer = None
+        self.packet_sniffer = None
         
         # Web API (如果启用且可用)
         if config.web_api.enabled and WEB_API_AVAILABLE:
@@ -120,7 +139,10 @@ class PythonSupervisor:
         self.stats = {
             'start_time': time.time(),
             'python_uptime': 0,
-            'last_cpp_stats': None
+            'last_cpp_stats': None,
+            'packets_received': 0,  # ★ 新增：数据包接收统计
+            'packets_analyzed': 0,  # ★ 新增：分析统计
+            'attacks_triggered': 0  # ★ 新增：攻击触发统计
         }
         
     def _setup_logging(self):
@@ -138,13 +160,13 @@ class PythonSupervisor:
         self.logger = logging.getLogger(__name__)
         
     def initialize(self) -> bool:
-        """初始化监督者和C++核心"""
+        """初始化监督者和C++核心 - 修正版本"""
         try:
             if USE_FALLBACK:
                 self.logger.warning("⚠️ Using Python fallback implementation (reduced performance)")
                 self.logger.info("🚀 Initializing Python Supervisor v3.0 with Python Fallback...")
             else:
-                self.logger.info("🚀 Initializing Python Supervisor v3.0 with C++ Core...")
+                self.logger.info("🚀 Initializing Python Supervisor v3.0 with C++ Core (Fixed Version)...")
             
             # 🔧 检查必需的类是否可用（仅在使用C++模块时）
             if not USE_FALLBACK:
@@ -160,8 +182,23 @@ class PythonSupervisor:
                     self.logger.error("❌ PacketSniffer class not found in C++ module")
                     return False
             
+            # ★ 关键修正：初始化ZMQ通信
+            self.logger.info("� Initializing ZMQ communication channels...")
+            
+            # 数据包接收器 (PULL模式 - 接收C++发送的数据包)
+            self.packet_receiver_socket = self.zmq_context.socket(zmq.PULL)
+            packet_addr = self.config.ipc.packet_address
+            self.packet_receiver_socket.bind(packet_addr)
+            self.logger.info(f"📡 Packet receiver bound to: {packet_addr}")
+            
+            # 命令发送器 (PUSH模式 - 发送命令給C++)
+            self.command_sender_socket = self.zmq_context.socket(zmq.PUSH)
+            command_addr = self.config.ipc.command_address  
+            self.command_sender_socket.bind(command_addr)
+            self.logger.info(f"📨 Command sender bound to: {command_addr}")
+            
             # 🔧 创建ARP欺骗器（使用网络接口）
-            interface = self.config.network.interface or "wlan0"  # 修正：使用network.interface
+            interface = self.config.network.interface or "wlan0"
             self.logger.info(f"📡 Creating ARPSpoofer with interface: {interface}")
             
             if USE_FALLBACK:
@@ -186,6 +223,20 @@ class PythonSupervisor:
                 self.logger.error("❌ Failed to initialize packet sniffer")
                 return False
             
+            # ★ 关键修正：设置攻击协调器的命令发送回调
+            def send_command_to_cpp(command_dict):
+                """发送命令到C++核心的回调函数"""
+                try:
+                    command_json = json.dumps(command_dict)
+                    self.command_sender_socket.send_string(command_json, zmq.NOBLOCK)
+                    self.logger.debug(f"📨 Sent command to C++: {command_dict['type']}")
+                    return True
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to send command to C++: {e}")
+                    return False
+            
+            self.attack_coordinator.set_command_sender(send_command_to_cpp)
+            
             impl_type = "Python Fallback" if USE_FALLBACK else "C++ Core"
             self.logger.info(f"✅ {impl_type} initialized successfully")
             self.logger.info(f"📡 Using network interface: {interface}")
@@ -200,7 +251,7 @@ class PythonSupervisor:
             else:
                 self.logger.info("💡 Web API 已关闭 - 优化性能模式")
             
-            self.logger.info("✅ Python Supervisor initialized successfully")
+            self.logger.info("✅ Python Supervisor initialized successfully (Fixed Version)")
             return True
             
         except Exception as e:
@@ -210,19 +261,29 @@ class PythonSupervisor:
             return False
             
     def run(self):
-        """运行主循环 - 启动C++核心并监控"""
+        """运行主循环 - 启动C++核心并监控 (修正版本)"""
         self.running = True
-        self.logger.info("🚀 Starting C++ Core Components...")
+        self.logger.info("🚀 Starting C++ Core Components (Fixed Version)...")
         
         try:
+            # ★ 关键修正：启动数据包接收线程
+            self.logger.info("📡 Starting packet receiver thread...")
+            self.packet_receiver_thread = threading.Thread(
+                target=self._packet_receiver_loop, 
+                name="PacketReceiver",
+                daemon=True
+            )
+            self.packet_receiver_thread.start()
+            
             # 🔧 启动数据包捕获
             self.packet_sniffer.start_capture()
-            self.logger.info("✅ Packet capture started")
+            self.logger.info("✅ C++ Packet capture started")
             
             # 🔧 启动监控线程
             self._start_monitoring()
             
             # 🔧 保持主线程运行
+            self.logger.info("🎯 System fully operational - monitoring network...")
             while self.running:
                 time.sleep(1)
                 
@@ -233,6 +294,57 @@ class PythonSupervisor:
         finally:
             self._shutdown()
             
+    def _packet_receiver_loop(self):
+        """★ 关键修正：在专用线程中接收和处理C++核心发送的数据包"""
+        self.logger.info("📡 Packet receiver thread started...")
+        
+        while self.running:
+            try:
+                # 使用poll避免永久阻塞，可以响应停止信号
+                if self.packet_receiver_socket.poll(timeout=1000):  # 1秒超时
+                    # 接收来自C++的JSON字符串
+                    packet_json = self.packet_receiver_socket.recv_string(zmq.NOBLOCK)
+                    self.stats['packets_received'] += 1
+                    
+                    self.logger.debug(f"📦 Received packet from C++: {len(packet_json)} bytes")
+                    
+                    # ★ 关键：分析数据包
+                    try:
+                        analysis_result = self.packet_analyzer.analyze_packet_json(packet_json)
+                        if analysis_result:
+                            self.stats['packets_analyzed'] += 1
+                            self.logger.info(f"📊 Analyzed {analysis_result.packet_type} packet from {analysis_result.source_ip}")
+                            
+                            # ★ 关键：交给协调器做决策
+                            self.attack_coordinator.process_analysis_result(analysis_result)
+                            
+                            # 检查是否触发了攻击
+                            if analysis_result.priority >= 2:  # 高优先级
+                                self.stats['attacks_triggered'] += 1
+                                self.logger.warning(f"🎯 High priority target detected: {analysis_result.source_ip}")
+                                
+                        else:
+                            self.logger.debug("📦 Packet analyzed but no significant result")
+                            
+                    except Exception as e:
+                        self.logger.error(f"❌ Error analyzing packet: {e}")
+                        
+            except zmq.Again:
+                # 非阻塞接收没有数据，继续循环
+                continue
+            except zmq.ZMQError as e:
+                if e.errno == zmq.ETERM:
+                    self.logger.info("🔌 ZMQ context terminated, exiting receiver loop")
+                    break
+                else:
+                    self.logger.error(f"❌ ZMQ error in receiver loop: {e}")
+            except Exception as e:
+                self.logger.error(f"❌ Unexpected error in packet receiver loop: {e}")
+                import traceback
+                self.logger.error(f"Stack trace: {traceback.format_exc()}")
+                
+        self.logger.info("📡 Packet receiver thread stopped")
+
     def _start_monitoring(self):
         """启动监控线程"""
         def monitor():
@@ -319,9 +431,29 @@ class PythonSupervisor:
                 
         return stats
     def _shutdown(self):
-        """清理资源"""
-        self.logger.info("🛑 Shutting down Python Supervisor...")
+        """清理资源 (修正版本)"""
+        self.logger.info("🛑 Shutting down Python Supervisor (Fixed Version)...")
+        if not self.running:
+            return
         self.running = False
+        
+        # ★ 关键修正：停止数据包接收线程
+        if hasattr(self, 'packet_receiver_thread') and self.packet_receiver_thread.is_alive():
+            self.logger.info("🛑 Stopping packet receiver thread...")
+            self.packet_receiver_thread.join(timeout=3)
+        
+        # ★ 关键修正：关闭ZMQ套接字和上下文
+        if hasattr(self, 'packet_receiver_socket') and self.packet_receiver_socket:
+            self.logger.info("🔌 Closing packet receiver socket...")
+            self.packet_receiver_socket.close()
+            
+        if hasattr(self, 'command_sender_socket') and self.command_sender_socket:
+            self.logger.info("🔌 Closing command sender socket...")
+            self.command_sender_socket.close()
+            
+        if hasattr(self, 'zmq_context') and self.zmq_context:
+            self.logger.info("🔌 Terminating ZMQ context...")
+            self.zmq_context.term()
         
         # 停止ARP欺骗器
         if hasattr(self, 'arp_spoofer'):

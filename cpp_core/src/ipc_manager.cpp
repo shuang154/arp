@@ -17,22 +17,28 @@ IPCManager::~IPCManager() {
 }
 
 bool IPCManager::initialize() {
+    // 默认实现，使用硬编码地址（保持兼容性）
+    return initialize("ipc:///tmp/arp_spoofer_packets.ipc", "ipc:///tmp/arp_spoofer_commands.ipc");
+}
+
+bool IPCManager::initialize(const std::string& packet_addr, const std::string& command_addr) {
     try {
         // 创建ZMQ上下文
         context_ = std::make_unique<zmq::context_t>(1);
         
         // 创建数据包发送socket (PUSH模式)
         packet_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::push);
-        packet_sender_->connect("ipc:///tmp/arp_spoofer_packets.ipc");
+        packet_sender_->connect(packet_addr);
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000); // 使用新API
         
         // 创建命令接收socket (PULL模式)  
         command_receiver_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pull);
-        command_receiver_->connect("ipc:///tmp/arp_spoofer_commands.ipc");
+        command_receiver_->connect(command_addr);
         command_receiver_->set(zmq::sockopt::rcvtimeo, 1); // 使用新API
         
         initialized_ = true;
-        std::cout << "[IPC Manager] Initialized successfully" << std::endl;
+        std::cout << "[IPC Manager] Initialized successfully. Packet sender: " << packet_addr 
+                  << ", Command receiver: " << command_addr << std::endl;
         return true;
         
     } catch (const std::exception& e) {

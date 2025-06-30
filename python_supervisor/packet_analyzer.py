@@ -88,6 +88,10 @@ class PacketAnalyzer:
             self.logger.error(f"Packet analysis error: {e}")
             return None
     
+    def analyze_packet_json(self, packet_json: str) -> Optional[AnalysisResult]:
+        """分析JSON格式的数据包 - analyze方法的别名"""
+        return self.analyze(packet_json)
+    
     def _analyze_arp_packet(self, packet_info: Dict) -> Optional[AnalysisResult]:
         """分析ARP数据包"""
         try:

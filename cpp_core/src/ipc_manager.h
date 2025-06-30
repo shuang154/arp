@@ -66,6 +66,7 @@ public:
     ~IPCManager();
     
     bool initialize();
+    bool initialize(const std::string& packet_addr, const std::string& command_addr);
     void shutdown();
     
     // 发送数据包给Python层

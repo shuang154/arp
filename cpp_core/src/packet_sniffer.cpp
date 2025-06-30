@@ -83,6 +83,20 @@ bool PacketSniffer::initialize() {
     return true;
 }
 
+bool PacketSniffer::initialize_with_ipc(const std::string& packet_addr, const std::string& command_addr) {
+    // 创建并初始化IPC管理器
+    ipc_manager_ = new IPCManager();
+    if (!ipc_manager_->initialize(packet_addr, command_addr)) {
+        std::cerr << "[Sniffer] Failed to initialize IPC manager" << std::endl;
+        delete ipc_manager_;
+        ipc_manager_ = nullptr;
+        return false;
+    }
+    
+    // 调用普通初始化
+    return initialize();
+}
+
 void PacketSniffer::start_sniffing() {
     if (!handle_) {
         std::cerr << "[Sniffer] Cannot start sniffing: not initialized" << std::endl;
