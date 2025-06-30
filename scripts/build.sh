@@ -234,43 +234,38 @@ auto_install_deps() {
     echo -e "${YELLOW}自动安装依赖...${NC}"
 
     if command -v pacman >/dev/null 2>&1; then
-        # Arch Linux - 优先安装 python-pybind11
-        echo -e "${YELLOW}正在安装 Arch Linux 依赖...${NC}"
-        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config python-pybind11 || {
-            echo -e "${YELLOW}部分依赖安装失败，尝试手动安装 python-pybind11...${NC}"
+        # Arch Linux
+        echo -e "${YELLOW}正在安装 Arch Linux 基础依赖...${NC}"
+        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config
+        
+        # 单独处理 pybind11 (Arch Linux 官方仓库中没有 python-pybind11)
+        echo -e "${YELLOW}处理 pybind11 依赖...${NC}"
+        if ! pacman -S --needed python-pybind11 2>/dev/null; then
+            echo -e "${YELLOW}pacman 无法安装 python-pybind11（包不存在），创建虚拟环境...${NC}"
             
-            # 尝试单独安装 python-pybind11
-            if ! pacman -S --needed python-pybind11 2>/dev/null; then
-                echo -e "${YELLOW}pacman 无法安装 python-pybind11，检测 externally-managed-environment...${NC}"
-                
-                # 检查是否存在 externally-managed-environment 限制
-                if python3 -c "import sys; print('externally-managed' in str(sys.prefix))" 2>/dev/null | grep -q "True"; then
-                    echo -e "${YELLOW}检测到 externally-managed-environment，创建虚拟环境...${NC}"
-                    
-                    # 创建虚拟环境并安装 pybind11
-                    python3 -m venv "${PROJECT_DIR}/venv" || {
-                        echo -e "${RED}无法创建虚拟环境${NC}"
-                        exit 1
-                    }
-                    
-                    source "${PROJECT_DIR}/venv/bin/activate"
-                    pip install pybind11 || {
-                        echo -e "${RED}虚拟环境中安装 pybind11 失败${NC}"
-                        deactivate
-                        exit 1
-                    }
-                    deactivate
-                    
-                    echo -e "${GREEN}✓ 已在虚拟环境中安装 pybind11${NC}"
-                else
-                    echo -e "${RED}无法安装 python-pybind11，请手动安装：${NC}"
-                    echo -e "${YELLOW}  方法1: sudo pacman -S python-pybind11${NC}"
-                    echo -e "${YELLOW}  方法2: yay -S python-pybind11${NC}"
-                    echo -e "${YELLOW}  方法3: pip install --user pybind11${NC}"
-                    exit 1
-                fi
-            fi
-        }
+            # 创建虚拟环境并安装 pybind11
+            VENV_PATH="${PROJECT_DIR}/venv"
+            echo -e "${YELLOW}创建虚拟环境: ${VENV_PATH}${NC}"
+            
+            python3 -m venv "${VENV_PATH}" || {
+                echo -e "${RED}无法创建虚拟环境${NC}"
+                exit 1
+            }
+            
+            echo -e "${YELLOW}激活虚拟环境并安装 pybind11...${NC}"
+            source "${VENV_PATH}/bin/activate"
+            pip install pybind11 || {
+                echo -e "${RED}虚拟环境中安装 pybind11 失败${NC}"
+                deactivate
+                exit 1
+            }
+            deactivate
+            
+            echo -e "${GREEN}✓ 已在虚拟环境中成功安装 pybind11${NC}"
+            echo -e "${GREEN}✓ 虚拟环境路径: ${VENV_PATH}${NC}"
+        else
+            echo -e "${GREEN}✓ 已通过 pacman 安装 python-pybind11${NC}"
+        fi
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu/Debian
         apt-get update
