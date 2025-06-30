@@ -42,8 +42,9 @@ if(NOT pybind11_FOUND)
     else()
         # 方法2: 检查项目虚拟环境
         set(VENV_PATH "${CMAKE_SOURCE_DIR}/../venv")
+        message(STATUS "Checking virtual environment at: ${VENV_PATH}")
         if(EXISTS "${VENV_PATH}/bin/python")
-            message(STATUS "Trying pybind11 in virtual environment: ${VENV_PATH}")
+            message(STATUS "Found virtual environment, trying pybind11...")
             execute_process(COMMAND ${VENV_PATH}/bin/python -c "import pybind11; print(pybind11.get_cmake_dir())"
                             OUTPUT_VARIABLE VENV_PYBIND11_CMAKE_DIR
                             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -53,9 +54,12 @@ if(NOT pybind11_FOUND)
                 message(STATUS "Found pybind11 in venv: ${VENV_PYBIND11_CMAKE_DIR}")
                 find_package(pybind11 REQUIRED HINTS ${VENV_PYBIND11_CMAKE_DIR})
             else()
-                message(FATAL_ERROR "pybind11 not found in virtual environment. Install with: ${VENV_PATH}/bin/pip install pybind11")
+                message(STATUS "pybind11 not found in virtual environment")
+                message(FATAL_ERROR 
+                    "pybind11 not found in virtual environment. Install with: ${VENV_PATH}/bin/pip install pybind11")
             endif()
         else()
+            message(STATUS "Virtual environment not found at: ${VENV_PATH}")
             # 方法3: 提供详细的安装指南
             message(FATAL_ERROR 
                 "pybind11 not found. Please install it using one of these methods:\n"

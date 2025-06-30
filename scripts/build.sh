@@ -31,6 +31,7 @@ echo ""
 INTERFACE=""
 DAEMON_MODE=false
 FORCE_BUILD=false
+CLEAN_VENV=false
 
 # 显示帮助信息
 show_help() {
@@ -42,12 +43,14 @@ show_help() {
     echo "  -i, --interface IFACE  指定网络接口 (可选，不提供时会交互式选择)"
     echo "  -d, --daemon          后台运行模式"
     echo "  -f, --force           强制重新构建"
+    echo "  -c, --clean           清理虚拟环境并重新创建"
     echo "  -h, --help            显示帮助信息"
     echo ""
     echo "示例:"
     echo "  sudo $0               # 交互式选择网络接口"
     echo "  sudo $0 -i eth0       # 直接指定eth0接口"
     echo "  sudo $0 -i wlan0 -d   # 在wlan0接口上后台运行"
+    echo "  sudo $0 -c            # 清理虚拟环境并重新创建"
     echo "  sudo $0 -f            # 强制重构建并交互选择接口"
     echo ""
     echo "可用网络接口:"
@@ -68,6 +71,10 @@ parse_arguments() {
                 ;;
             -f|--force)
                 FORCE_BUILD=true
+                shift
+                ;;
+            -c|--clean)
+                CLEAN_VENV=true
                 shift
                 ;;
             -h|--help)
@@ -244,8 +251,14 @@ auto_install_deps() {
             echo -e "${YELLOW}pacman 无法安装 python-pybind11（包不存在），创建虚拟环境...${NC}"
             
             # 创建虚拟环境并安装 pybind11
-            VENV_PATH="${PROJECT_DIR}/venv"
+            VENV_PATH="${PROJECT_ROOT}/venv"
             echo -e "${YELLOW}创建虚拟环境: ${VENV_PATH}${NC}"
+            
+            # 如果虚拟环境已存在但有问题，先清理
+            if [ -d "${VENV_PATH}" ]; then
+                echo -e "${YELLOW}清理旧的虚拟环境...${NC}"
+                rm -rf "${VENV_PATH}"
+            fi
             
             python3 -m venv "${VENV_PATH}" || {
                 echo -e "${RED}无法创建虚拟环境${NC}"
@@ -505,6 +518,19 @@ main() {
     
     # 解析命令行参数
     parse_arguments "$@"
+    
+    # 如果指定了清理选项，先清理虚拟环境
+    if [ "$CLEAN_VENV" = true ]; then
+        echo -e "${YELLOW}清理虚拟环境...${NC}"
+        if [ -d "${PROJECT_ROOT}/venv" ]; then
+            rm -rf "${PROJECT_ROOT}/venv"
+            echo -e "${GREEN}✓ 虚拟环境已清理${NC}"
+        else
+            echo -e "${YELLOW}虚拟环境不存在，无需清理${NC}"
+        fi
+        # 强制重新构建以重新检测依赖
+        FORCE_BUILD=true
+    fi
     
     # 基础检查
     check_root
