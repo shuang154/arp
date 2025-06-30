@@ -169,14 +169,23 @@ class PythonSupervisor:
                     cpp_stats = self.cpp_processor.get_statistics()
                     self.stats['last_cpp_stats'] = cpp_stats
                     
-                    # 输出关键指标
+                    # 🔧 输出更详细的关键指标，类似旧版本
                     self.logger.info(
-                        f"📈 C++ Stats: "
-                        f"Processed={cpp_stats.packets_processed}, "
-                        f"Attacks={cpp_stats.attacks_launched}, "
-                        f"Rate={cpp_stats.processing_rate:.1f}pps, "
-                        f"Hit Rate={cpp_stats.hit_rate:.1f}%"
+                        f"� [MainThread] C++ Core Stats: "
+                        f"📡 Captured={cpp_stats.packets_captured}, "
+                        f"⚙️ Processed={cpp_stats.packets_processed}, "
+                        f"🎯 Attacks={cpp_stats.attacks_launched}, "
+                        f"✅ Success={cpp_stats.attacks_successful}, "
+                        f"📈 Rate={cpp_stats.processing_rate:.1f}pps, "
+                        f"💯 Hit Rate={cpp_stats.hit_rate:.1f}%"
                     )
+                    
+                    # 🔧 添加状态检查和警告
+                    if cpp_stats.packets_captured == 0:
+                        self.logger.warning("⚠️ No packets being captured - using simulation mode")
+                    
+                    if cpp_stats.processing_rate < 10.0:
+                        self.logger.warning(f"⚠️ Low processing rate: {cpp_stats.processing_rate:.1f}pps")
                     
                 except KeyboardInterrupt:
                     self.logger.info("🛑 Received interrupt signal")

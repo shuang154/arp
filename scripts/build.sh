@@ -202,6 +202,11 @@ check_dependencies() {
         missing_deps+=("jsoncpp-devel")
     fi
     
+    # 🔧 检查libpcap（真实网络捕获必需）
+    if ! pkg-config --exists libpcap 2>/dev/null; then
+        missing_deps+=("libpcap-devel")
+    fi
+    
     # 检查pybind11
     if ! python3 -c "import pybind11" 2>/dev/null; then
         missing_deps+=("python3-pybind11")
@@ -215,9 +220,9 @@ check_dependencies() {
         
         # 检测发行版并提供相应的安装命令
         if command -v pacman >/dev/null 2>&1; then
-            echo "Arch Linux: sudo pacman -Syu cmake gcc python python-pip zeromq cppzmq jsoncpp"
+            echo "Arch Linux: sudo pacman -Syu cmake gcc python python-pip zeromq cppzmq jsoncpp libpcap"
         elif command -v apt-get >/dev/null 2>&1; then
-            echo "Ubuntu/Debian: sudo apt-get install cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev"
+            echo "Ubuntu/Debian: sudo apt-get install cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev libpcap-dev"
         elif command -v yum >/dev/null 2>&1; then
             echo "CentOS/RHEL: sudo yum install cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel"
         fi
@@ -243,7 +248,7 @@ auto_install_deps() {
     if command -v pacman >/dev/null 2>&1; then
         # Arch Linux
         echo -e "${YELLOW}正在安装 Arch Linux 基础依赖...${NC}"
-        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config
+        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp libpcap pkg-config
         
         # 单独处理 pybind11 (Arch Linux 官方仓库中没有 python-pybind11)
         echo -e "${YELLOW}处理 pybind11 依赖...${NC}"
@@ -282,10 +287,10 @@ auto_install_deps() {
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu/Debian
         apt-get update
-        apt-get install -y cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev pkg-config python3-pybind11
+        apt-get install -y cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev libpcap-dev pkg-config python3-pybind11
     elif command -v yum >/dev/null 2>&1; then
         # CentOS/RHEL
-        yum install -y cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel pkg-config python3-pybind11
+        yum install -y cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel libpcap-devel pkg-config python3-pybind11
     else
         echo -e "${RED}无法识别的包管理器，请手动安装依赖${NC}"
         exit 1

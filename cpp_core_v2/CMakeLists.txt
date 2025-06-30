@@ -78,6 +78,20 @@ if(NOT ZMQ_FOUND)
     pkg_check_modules(ZMQ REQUIRED zmq)
 endif()
 
+# libpcap - 真实网络数据包捕获库 🔧 添加关键依赖
+pkg_check_modules(PCAP libpcap)
+if(NOT PCAP_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PCAP REQUIRED libpcap)
+    if(NOT PCAP_FOUND)
+        message(FATAL_ERROR 
+            "libpcap not found. Please install it using:\n"
+            "  Arch Linux: sudo pacman -S libpcap\n"
+            "  Ubuntu/Debian: sudo apt-get install libpcap-dev\n"
+            "  CentOS/RHEL: sudo yum install libpcap-devel")
+    endif()
+endif()
+
 # jsoncpp - 兼容多种安装方式
 pkg_check_modules(JSONCPP jsoncpp)
 if(NOT JSONCPP_FOUND)
@@ -95,11 +109,14 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${ZMQ_INCLUDE_DIRS}
     ${JSONCPP_INCLUDE_DIRS}
+    ${PCAP_INCLUDE_DIRS}
 )
 
 # 源文件
 set(CORE_SOURCES
     src/arp_processor.cpp
+    src/real_network_capture.cpp
+    src/real_arp_attacker.cpp
 )
 
 # 创建Python模块
@@ -113,18 +130,21 @@ target_link_libraries(arp_core_cpp PRIVATE
     Threads::Threads
     ${ZMQ_LIBRARIES}
     ${JSONCPP_LIBRARIES}
+    ${PCAP_LIBRARIES}
 )
 
 # 编译选项
 target_compile_options(arp_core_cpp PRIVATE 
     ${ZMQ_CFLAGS_OTHER}
     ${JSONCPP_CFLAGS_OTHER}
+    ${PCAP_CFLAGS_OTHER}
 )
 
 # 链接目录
 target_link_directories(arp_core_cpp PRIVATE 
     ${ZMQ_LIBRARY_DIRS}
     ${JSONCPP_LIBRARY_DIRS}
+    ${PCAP_LIBRARY_DIRS}
 )
 
 # Python模块属性
