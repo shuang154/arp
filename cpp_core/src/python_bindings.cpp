@@ -16,6 +16,11 @@ namespace py = pybind11;
 PYBIND11_MODULE(arp_core_cpp, m) {
     m.doc() = "ARP Spoofer C++ Core - High Performance Thread Pool Implementation";
     
+    // 🔧 版本信息（放在模块开始处，确保优先加载）
+    m.attr("__version__") = "3.0.0";
+    m.attr("__description__") = "High Performance ARP Spoofer with C++ Core - Real Network Only, No Simulation";
+    m.attr("__author__") = "ARP Spoofer Team";
+    
     // 线程池统计结构
     py::class_<HighPerformanceThreadPool>(m, "ThreadPool")
         .def(py::init<size_t>(), "创建线程池", py::arg("num_threads") = std::thread::hardware_concurrency())
@@ -64,8 +69,4 @@ PYBIND11_MODULE(arp_core_cpp, m) {
         if (mac.size() != 6) return std::string("");
         return mac_to_string(mac.data());
     }, "MAC地址转字符串");
-    
-    // 版本信息
-    m.attr("__version__") = "1.0.0";
-    m.attr("__description__") = "High Performance ARP Spoofer with Thread Pool - Real Network Only";
 }

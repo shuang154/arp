@@ -25,8 +25,11 @@ from datetime import datetime
 try:
     import arp_core_cpp
     print("✅ C++ core module loaded successfully")
-    print(f"📦 Module version: {arp_core_cpp.__version__}")
-    print(f"📋 Description: {arp_core_cpp.__description__}")
+    # 安全地获取版本信息（如果存在）
+    version = getattr(arp_core_cpp, '__version__', 'unknown')
+    description = getattr(arp_core_cpp, '__description__', 'ARP Spoofer C++ Core')
+    print(f"📦 Module version: {version}")
+    print(f"📋 Description: {description}")
 except ImportError as e:
     print(f"❌ Failed to import C++ core module: {e}")
     print("Please build the C++ module first:")
@@ -154,51 +157,9 @@ class PythonSupervisor:
                 time.sleep(1)
                 
         except KeyboardInterrupt:
-            self.logger.info("� Received interrupt signal...")
-            self.shutdown()
+            self.logger.info("🛑 Received interrupt signal...")
         except Exception as e:
             self.logger.error(f"❌ Error in main loop: {e}")
-            self.shutdown()
-            
-            # 🔧 主线程等待C++处理器运行
-            self.logger.info("📊 Monitoring C++ processor performance...")
-            
-            while self.running and self.cpp_processor.is_running():
-                try:
-                    # 每5秒检查一次状态
-                    time.sleep(5)
-                    
-                    # 获取C++统计信息
-                    cpp_stats = self.cpp_processor.get_statistics()
-                    self.stats['last_cpp_stats'] = cpp_stats
-                    
-                    # 🔧 输出更详细的关键指标，类似旧版本
-                    self.logger.info(
-                        f"� [MainThread] C++ Core Stats: "
-                        f"📡 Captured={cpp_stats.packets_captured}, "
-                        f"⚙️ Processed={cpp_stats.packets_processed}, "
-                        f"🎯 Attacks={cpp_stats.attacks_launched}, "
-                        f"✅ Success={cpp_stats.attacks_successful}, "
-                        f"📈 Rate={cpp_stats.processing_rate:.1f}pps, "
-                        f"💯 Hit Rate={cpp_stats.hit_rate:.1f}%"
-                    )
-                    
-                    # 🔧 添加状态检查和警告
-                    if cpp_stats.packets_captured == 0:
-                        self.logger.warning("⚠️ No packets being captured - using simulation mode")
-                    
-                    if cpp_stats.processing_rate < 10.0:
-                        self.logger.warning(f"⚠️ Low processing rate: {cpp_stats.processing_rate:.1f}pps")
-                    
-                except KeyboardInterrupt:
-                    self.logger.info("🛑 Received interrupt signal")
-                    break
-                except Exception as e:
-                    self.logger.error(f"❌ Error in monitoring loop: {e}")
-                    time.sleep(1)
-                    
-        except Exception as e:
-            self.logger.error(f"❌ Error running supervisor: {e}")
         finally:
             self._shutdown()
             
@@ -379,6 +340,10 @@ class PythonSupervisor:
             self.logger.error(f"❌ Error stopping attack on {target_ip}: {e}")
             return False
 
+    def shutdown(self):
+        """关闭系统 - _shutdown 的别名"""
+        self._shutdown()
+        
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")
