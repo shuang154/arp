@@ -48,6 +48,13 @@ pacman 无法安装 python-pybind11（包不存在），创建虚拟环境...
 ✓ 已在虚拟环境中成功安装 pybind11
 构建C++核心...
 -- Found pybind11 in venv: /home/zs/文档/projects/arp_s/venv/lib/python3.13/site-packages/pybind11/share/cmake/pybind11
+-- Build type: Release
+-- Configuring done (7.4s)
+-- Generating done (0.0s)
+编译中... (使用 4 核心)
+[ 33%] Building CXX object CMakeFiles/arp_core_cpp.dir/src/python_bindings.cpp.o
+[ 66%] Building CXX object CMakeFiles/arp_core_cpp.dir/src/arp_processor.cpp.o
+[100%] Linking CXX shared module arp_core_cpp.cpython-313-aarch64-linux-gnu.so
 ✓ 构建成功
 ✓ 高性能配置文件已创建
 启动ARP Spoofer C++ Core...

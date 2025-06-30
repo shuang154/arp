@@ -13,11 +13,37 @@
 #include <queue>
 #include <functional>
 
+// 配置结构体定义
+struct Config {
+    // 性能配置
+    int max_worker_threads = 8;
+    int packet_batch_size = 15;
+    double packet_batch_timeout = 0.08;
+    
+    // 网络配置
+    std::string interface = "wlan0";
+    std::string gateway_ip = "10.17.0.1";
+    std::vector<int> target_ports = {80, 443, 8080, 801};
+    
+    // 攻击配置
+    int attack_timeout = 45;
+    int max_concurrent_attacks = 12;
+    int cooldown_time = 3600;
+    
+    // 缓存配置
+    int arp_cache_ttl = 1800;
+    int attack_cache_ttl = 3600;
+    int target_info_ttl = 7200;
+    
+    // IPC配置
+    std::string packet_ipc_address = "ipc:///tmp/arp_spoofer_packets.ipc";
+    std::string command_ipc_address = "ipc:///tmp/arp_spoofer_commands.ipc";
+};
+
 // 前向声明
 struct PacketData;
 struct AttackDecision;
 struct Statistics;
-struct Config;
 
 /**
  * 高性能ARP攻击处理器
@@ -193,30 +219,4 @@ struct Statistics {
     double hit_rate;
     int active_attacks_count;
     std::chrono::seconds uptime;
-};
-
-struct Config {
-    // 性能配置
-    int max_worker_threads = 8;
-    int packet_batch_size = 15;
-    double packet_batch_timeout = 0.08;
-    
-    // 网络配置
-    std::string interface = "wlan0";
-    std::string gateway_ip = "10.17.0.1";
-    std::vector<int> target_ports = {80, 443, 8080, 801};
-    
-    // 攻击配置
-    int attack_timeout = 45;
-    int max_concurrent_attacks = 12;
-    int cooldown_time = 3600;
-    
-    // 缓存配置
-    int arp_cache_ttl = 1800;
-    int attack_cache_ttl = 3600;
-    int target_info_ttl = 7200;
-    
-    // IPC配置
-    std::string packet_ipc_address = "ipc:///tmp/arp_spoofer_packets.ipc";
-    std::string command_ipc_address = "ipc:///tmp/arp_spoofer_commands.ipc";
 };
