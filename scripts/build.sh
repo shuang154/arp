@@ -39,15 +39,16 @@ show_help() {
     echo "用法: sudo $0 [选项]"
     echo ""
     echo "选项:"
-    echo "  -i, --interface IFACE  指定网络接口 (必需)"
+    echo "  -i, --interface IFACE  指定网络接口 (可选，不提供时会交互式选择)"
     echo "  -d, --daemon          后台运行模式"
     echo "  -f, --force           强制重新构建"
     echo "  -h, --help            显示帮助信息"
     echo ""
     echo "示例:"
-    echo "  sudo $0 -i eth0       # 在eth0接口上运行"
+    echo "  sudo $0               # 交互式选择网络接口"
+    echo "  sudo $0 -i eth0       # 直接指定eth0接口"
     echo "  sudo $0 -i wlan0 -d   # 在wlan0接口上后台运行"
-    echo "  sudo $0 -i eth0 -f    # 强制重构建后运行"
+    echo "  sudo $0 -f            # 强制重构建并交互选择接口"
     echo ""
     echo "可用网络接口:"
     ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print "  " $2}' | sed 's/@.*//' 2>/dev/null || echo "  无法获取接口列表"
@@ -81,12 +82,73 @@ parse_arguments() {
         esac
     done
 
-    # 检查必需参数
+    # 如果没有提供接口参数，提供交互式选择
     if [ -z "$INTERFACE" ]; then
-        echo -e "${RED}错误: 必须指定网络接口${NC}"
+        echo -e "${YELLOW}未指定网络接口，正在检测...${NC}"
         echo ""
-        show_help
-        exit 1
+        
+        # 获取可用网络接口（排除lo回环接口）
+        local interfaces=($(ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -v "^lo$"))
+        
+        if [ ${#interfaces[@]} -eq 0 ]; then
+            echo -e "${RED}错误: 未找到可用的网络接口${NC}"
+            exit 1
+        fi
+        
+        # 尝试智能推荐接口
+        local default_iface=""
+        local recommended_idx=0
+        
+        # 检查默认路由接口
+        default_iface=$(ip route | grep default | awk '{print $5}' | head -1)
+        
+        echo "可用网络接口:"
+        for i in "${!interfaces[@]}"; do
+            local iface="${interfaces[i]}"
+            local status="DOWN"
+            local ip_addr=""
+            
+            # 检查接口状态
+            if ip link show "$iface" | grep -q "state UP"; then
+                status="UP"
+                ip_addr=$(ip addr show "$iface" | grep "inet " | awk '{print $2}' | head -1)
+            fi
+            
+            local marker=""
+            if [ "$iface" = "$default_iface" ] && [ "$status" = "UP" ]; then
+                marker=" ${GREEN}(推荐)${NC}"
+                recommended_idx=$((i+1))
+            fi
+            
+            printf "  %d. %-8s [%s] %s%s\n" $((i+1)) "$iface" "$status" "${ip_addr:-无IP}" "$marker"
+        done
+        echo ""
+        
+        # 提供默认选择
+        local prompt="请选择网络接口 (1-${#interfaces[@]})"
+        if [ $recommended_idx -gt 0 ]; then
+            prompt="${prompt}，直接回车选择推荐接口"
+        fi
+        prompt="${prompt}: "
+        
+        while true; do
+            read -p "$prompt" choice
+            
+            # 如果直接回车且有推荐接口，使用推荐接口
+            if [ -z "$choice" ] && [ $recommended_idx -gt 0 ]; then
+                choice=$recommended_idx
+            fi
+            
+            # 检查输入是否为数字
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#interfaces[@]}" ]; then
+                INTERFACE="${interfaces[$((choice-1))]}"
+                echo -e "${GREEN}✓ 已选择网络接口: $INTERFACE${NC}"
+                break
+            else
+                echo -e "${RED}无效选择，请输入 1-${#interfaces[@]} 之间的数字${NC}"
+            fi
+        done
+        echo ""
     fi
 }
 

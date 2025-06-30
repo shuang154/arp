@@ -41,36 +41,52 @@ cd arp_s
 # 或上传项目文件到香橙派
 ```
 
-#### 3. 一键构建
+#### 3. 一键启动
 ```bash
 # 给构建脚本执行权限
-chmod +x build_orangepi.sh
+chmod +x scripts/build.sh
 
-# 运行构建脚本
-./build_orangepi.sh
+# 方式1: 交互式启动（推荐新手）
+sudo ./scripts/build.sh
+
+# 方式2: 直接指定接口启动
+sudo ./scripts/build.sh -i eth0
+
+# 方式3: 后台运行
+sudo ./scripts/build.sh -i eth0 -d
+
+# 方式4: 强制重构建
+sudo ./scripts/build.sh -f
 ```
 
-#### 4. 配置系统
+**交互式选择说明:**
+- 脚本会自动检测可用网络接口
+- 显示接口状态（UP/DOWN）和IP地址
+- 自动推荐最佳接口（有默认路由且状态为UP）
+- 直接回车选择推荐接口，或输入数字选择其他接口
+
+#### 4. 运行效果
+脚本运行时会显示类似如下界面：
 ```bash
-# 编辑配置文件
-cd python_supervisor
-cp config/config.yaml.example config/config.yaml
-vim config/config.yaml
+========================================
+  ARP Spoofer C++ Core - 香橙派版
+========================================
+项目路径: /home/zs/文档/projects/arp_s
 
-# 关键配置项：
-# - network.interface: 设置为香橙派的网络接口 (如 eth0)
-# - network.gateway_ip: 设置为网关IP
-# - attack.max_concurrent_attacks: 根据内存调整
+未指定网络接口，正在检测...
+
+可用网络接口:
+  1. end1    [UP] 192.168.1.100/24 (推荐)
+  2. wlan0   [DOWN] 无IP
+
+请选择网络接口 (1-2)，直接回车选择推荐接口: 
 ```
 
-#### 5. 运行系统
-```bash
-# 前台运行 (测试用)
-python3 main.py -c config/config.yaml --log-level INFO
-
-# 后台运行 (生产环境)
-nohup python3 main.py -c config/config.yaml --log-level INFO > ../logs/arp_spoofer.log 2>&1 &
-```
+选择接口后，脚本会自动：
+- 检查并安装依赖
+- 编译C++核心模块  
+- 生成优化配置文件
+- 启动高性能ARP攻击服务
 
 ### 🔧 性能优化
 
