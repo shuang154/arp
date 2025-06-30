@@ -10,9 +10,19 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -flto")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
 
 # 查找Python和pybind11
+# 🔧 优先使用命令行指定的Python解释器
+if(PYTHON_EXECUTABLE)
+    message(STATUS "Using specified Python executable: ${PYTHON_EXECUTABLE}")
+    set(Python_EXECUTABLE ${PYTHON_EXECUTABLE})
+endif()
+
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
-# 尝试查找pybind11，如果失败则使用子模块方式
+# 显示使用的Python信息
+message(STATUS "Python executable: ${Python_EXECUTABLE}")
+message(STATUS "Python version: ${Python_VERSION}")
+
+# 尝试查找pybind11，如果失败则使用pip安装位置
 find_package(pybind11 QUIET)
 if(NOT pybind11_FOUND)
     message(STATUS "pybind11 not found via find_package, trying pip install location...")
