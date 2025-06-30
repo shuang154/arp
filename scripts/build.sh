@@ -234,30 +234,50 @@ auto_install_deps() {
     echo -e "${YELLOW}自动安装依赖...${NC}"
 
     if command -v pacman >/dev/null 2>&1; then
-        # Arch Linux
-        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config || {
-            echo -e "${RED}部分依赖安装失败，检测是否为 externally-managed-environment...${NC}"
-            if python -m ensurepip --version >/dev/null 2>&1; then
-                echo -e "${YELLOW}创建虚拟环境并安装缺失依赖...${NC}"
-                python -m venv venv
-                source venv/bin/activate
-                pip install pybind11 || {
-                    echo -e "${RED}pip 安装失败，请手动安装 pybind11 或使用 AUR 工具（如 yay）安装 python-pybind11${NC}"
+        # Arch Linux - 优先安装 python-pybind11
+        echo -e "${YELLOW}正在安装 Arch Linux 依赖...${NC}"
+        pacman -Syu --needed cmake gcc python python-pip zeromq cppzmq jsoncpp pkg-config python-pybind11 || {
+            echo -e "${YELLOW}部分依赖安装失败，尝试手动安装 python-pybind11...${NC}"
+            
+            # 尝试单独安装 python-pybind11
+            if ! pacman -S --needed python-pybind11 2>/dev/null; then
+                echo -e "${YELLOW}pacman 无法安装 python-pybind11，检测 externally-managed-environment...${NC}"
+                
+                # 检查是否存在 externally-managed-environment 限制
+                if python3 -c "import sys; print('externally-managed' in str(sys.prefix))" 2>/dev/null | grep -q "True"; then
+                    echo -e "${YELLOW}检测到 externally-managed-environment，创建虚拟环境...${NC}"
+                    
+                    # 创建虚拟环境并安装 pybind11
+                    python3 -m venv "${PROJECT_DIR}/venv" || {
+                        echo -e "${RED}无法创建虚拟环境${NC}"
+                        exit 1
+                    }
+                    
+                    source "${PROJECT_DIR}/venv/bin/activate"
+                    pip install pybind11 || {
+                        echo -e "${RED}虚拟环境中安装 pybind11 失败${NC}"
+                        deactivate
+                        exit 1
+                    }
+                    deactivate
+                    
+                    echo -e "${GREEN}✓ 已在虚拟环境中安装 pybind11${NC}"
+                else
+                    echo -e "${RED}无法安装 python-pybind11，请手动安装：${NC}"
+                    echo -e "${YELLOW}  方法1: sudo pacman -S python-pybind11${NC}"
+                    echo -e "${YELLOW}  方法2: yay -S python-pybind11${NC}"
+                    echo -e "${YELLOW}  方法3: pip install --user pybind11${NC}"
                     exit 1
-                }
-                deactivate
-            else
-                echo -e "${RED}无法创建虚拟环境，请手动安装 pybind11 或使用 AUR 工具（如 yay）安装 python-pybind11${NC}"
-                exit 1
+                fi
             fi
         }
     elif command -v apt-get >/dev/null 2>&1; then
         # Ubuntu/Debian
         apt-get update
-        apt-get install -y cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev pkg-config
+        apt-get install -y cmake g++ python3-dev python3-pip libzmq3-dev libjsoncpp-dev pkg-config python3-pybind11
     elif command -v yum >/dev/null 2>&1; then
         # CentOS/RHEL
-        yum install -y cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel pkg-config
+        yum install -y cmake gcc-c++ python3-devel python3-pip zeromq-devel jsoncpp-devel pkg-config python3-pybind11
     else
         echo -e "${RED}无法识别的包管理器，请手动安装依赖${NC}"
         exit 1

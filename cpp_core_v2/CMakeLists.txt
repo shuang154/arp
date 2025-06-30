@@ -25,25 +25,44 @@ endif()
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 
-# pybind11 - 优先使用系统安装的版本
+# pybind11 - 智能检测多种安装方式
 find_package(pybind11 QUIET)
 if(NOT pybind11_FOUND)
-    message(STATUS "pybind11 not found via find_package, trying pip install location")
-    # 尝试从pip安装位置查找
+    message(STATUS "pybind11 not found via find_package, trying alternative locations")
+    
+    # 方法1: 检查系统pip安装位置
     execute_process(COMMAND python3 -c "import pybind11; print(pybind11.get_cmake_dir())" 
                     OUTPUT_VARIABLE PYBIND11_CMAKE_DIR 
-                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    
     if(PYBIND11_CMAKE_DIR)
+        message(STATUS "Found pybind11 in system Python: ${PYBIND11_CMAKE_DIR}")
         find_package(pybind11 REQUIRED HINTS ${PYBIND11_CMAKE_DIR})
     else()
-        # 检查虚拟环境中的pybind11
-        execute_process(COMMAND python3 -m venv venv && source venv/bin/activate && python -c "import pybind11; print(pybind11.get_cmake_dir())" 
-                        OUTPUT_VARIABLE VENV_PYBIND11_CMAKE_DIR 
-                        OUTPUT_STRIP_TRAILING_WHITESPACE)
-        if(VENV_PYBIND11_CMAKE_DIR)
-            find_package(pybind11 REQUIRED HINTS ${VENV_PYBIND11_CMAKE_DIR})
+        # 方法2: 检查项目虚拟环境
+        set(VENV_PATH "${CMAKE_SOURCE_DIR}/../venv")
+        if(EXISTS "${VENV_PATH}/bin/python")
+            message(STATUS "Trying pybind11 in virtual environment: ${VENV_PATH}")
+            execute_process(COMMAND ${VENV_PATH}/bin/python -c "import pybind11; print(pybind11.get_cmake_dir())"
+                            OUTPUT_VARIABLE VENV_PYBIND11_CMAKE_DIR
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET)
+            
+            if(VENV_PYBIND11_CMAKE_DIR)
+                message(STATUS "Found pybind11 in venv: ${VENV_PYBIND11_CMAKE_DIR}")
+                find_package(pybind11 REQUIRED HINTS ${VENV_PYBIND11_CMAKE_DIR})
+            else()
+                message(FATAL_ERROR "pybind11 not found in virtual environment. Install with: ${VENV_PATH}/bin/pip install pybind11")
+            endif()
         else()
-            message(FATAL_ERROR "pybind11 not found. Install with: pip3 install pybind11 or use a virtual environment.")
+            # 方法3: 提供详细的安装指南
+            message(FATAL_ERROR 
+                "pybind11 not found. Please install it using one of these methods:\n"
+                "  Arch Linux: sudo pacman -S python-pybind11\n"
+                "  AUR: yay -S python-pybind11\n"
+                "  Pip (system): pip3 install --user pybind11\n"
+                "  Pip (venv): python3 -m venv venv && source venv/bin/activate && pip install pybind11")
         endif()
     endif()
 endif()
