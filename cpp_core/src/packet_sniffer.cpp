@@ -23,38 +23,48 @@ PacketSniffer::~PacketSniffer() {
 
 // ★ 关键修正: 修改初始化方法以接受IPC配置
 bool PacketSniffer::initialize(const std::string& packet_addr, const std::string& command_addr) {
-    std::cout << "[Packet Sniffer] Initializing on interface " << interface_ << std::endl;
-    std::cout << "[Packet Sniffer] IPC - Packet: " << packet_addr << ", Command: " << command_addr << std::endl;
+    std::cout << "[Packet Sniffer] 🔧 Initializing on interface " << interface_ << std::endl;
+    std::cout << "[Packet Sniffer] 🔌 IPC - Packet: " << packet_addr << ", Command: " << command_addr << std::endl;
     
     // ★ 使用传入的地址初始化IPC管理器
     if (!ipc_manager_->initialize(packet_addr, command_addr)) {
-        std::cerr << "[Packet Sniffer] Failed to initialize IPC manager" << std::endl;
+        std::cerr << "[Packet Sniffer] ❌ Failed to initialize IPC manager" << std::endl;
         return false;
     }
     
     char errbuf[PCAP_ERRBUF_SIZE];
     
+    // 🔧 增加接口检查和调试信息
+    std::cout << "[Packet Sniffer] 🔍 Checking interface " << interface_ << "..." << std::endl;
+    
     // 打开网络接口进行捕获
     handle_ = pcap_open_live(interface_.c_str(), 65536, 1, 1000, errbuf);
     if (!handle_) {
-        std::cerr << "[Packet Sniffer] Could not open device " << interface_ 
+        std::cerr << "[Packet Sniffer] ❌ Could not open device " << interface_ 
                   << ": " << errbuf << std::endl;
+        std::cerr << "[Packet Sniffer] 💡 Troubleshooting tips:" << std::endl;
+        std::cerr << "   - Check if interface exists: ip link show" << std::endl;
+        std::cerr << "   - Check if running as root: sudo required for packet capture" << std::endl;
+        std::cerr << "   - Check if interface is up: ip link set " << interface_ << " up" << std::endl;
         return false;
     }
+    
+    std::cout << "[Packet Sniffer] ✅ Successfully opened interface " << interface_ << std::endl;
     
     // 设置过滤器：捕获ARP包和常见端口的TCP流量
     struct bpf_program filter;
     const char* filter_exp = "arp or (tcp and (port 80 or port 443 or port 21 or port 22 or port 23 or port 25))";
     
+    std::cout << "[Packet Sniffer] 🔍 Setting capture filter: " << filter_exp << std::endl;
     if (pcap_compile(handle_, &filter, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-        std::cerr << "[Packet Sniffer] Could not parse filter: " << pcap_geterr(handle_) << std::endl;
+        std::cerr << "[Packet Sniffer] ❌ Could not parse filter: " << pcap_geterr(handle_) << std::endl;
         pcap_close(handle_);
         handle_ = nullptr;
         return false;
     }
     
     if (pcap_setfilter(handle_, &filter) == -1) {
-        std::cerr << "[Packet Sniffer] Could not install filter: " << pcap_geterr(handle_) << std::endl;
+        std::cerr << "[Packet Sniffer] ❌ Could not install filter: " << pcap_geterr(handle_) << std::endl;
         pcap_freecode(&filter);
         pcap_close(handle_);
         handle_ = nullptr;
@@ -63,29 +73,47 @@ bool PacketSniffer::initialize(const std::string& packet_addr, const std::string
     
     pcap_freecode(&filter);
     
-    std::cout << "[Packet Sniffer] Initialized successfully with filter: " << filter_exp << std::endl;
+    std::cout << "[Packet Sniffer] ✅ Initialized successfully with filter: " << filter_exp << std::endl;
+    std::cout << "[Packet Sniffer] 🚀 Ready to capture packets from " << interface_ << std::endl;
     return true;
 }
 
 // 保持原有的其他方法不变
 void PacketSniffer::stop_capture() {
+    std::cout << "[Packet Sniffer] 🛑 Stopping packet capture..." << std::endl;
+    
     if (running_) {
         running_ = false;
+        
+        // 通知 pcap_next_ex 退出
+        if (handle_) {
+            pcap_breakloop(handle_);
+        }
+        
         if (capture_thread_ && capture_thread_->joinable()) {
+            std::cout << "[Packet Sniffer] 🔄 Waiting for capture thread to finish..." << std::endl;
             capture_thread_->join();
+            std::cout << "[Packet Sniffer] ✅ Capture thread stopped" << std::endl;
         }
     }
     
     if (handle_) {
+        std::cout << "[Packet Sniffer] 🔌 Closing pcap handle..." << std::endl;
         pcap_close(handle_);
         handle_ = nullptr;
     }
     
     if (ipc_manager_) {
+        std::cout << "[Packet Sniffer] 🔌 Shutting down IPC manager..." << std::endl;
         ipc_manager_->shutdown();
     }
     
-    std::cout << "[Packet Sniffer] Stopped capture" << std::endl;
+    size_t final_total = total_packets_.load();
+    size_t final_filtered = filtered_packets_.load();
+    
+    std::cout << "[Packet Sniffer] ✅ Stopped capture - Final stats: Total=" << final_total 
+              << ", Filtered=" << final_filtered << " (" 
+              << (final_total > 0 ? (final_filtered * 100 / final_total) : 0) << "%)" << std::endl;
 }
 
 bool PacketSniffer::start_capture() {
@@ -107,7 +135,11 @@ bool PacketSniffer::start_capture() {
 }
 
 void PacketSniffer::capture_loop() {
-    std::cout << "[Packet Sniffer] Starting packet capture loop..." << std::endl;
+    std::cout << "[Packet Sniffer] 🔄 Starting packet capture loop on " << interface_ << "..." << std::endl;
+    
+    // 统计相关变量
+    auto last_stats_time = std::chrono::steady_clock::now();
+    size_t last_total_packets = 0;
     
     while (running_) {
         struct pcap_pkthdr* header;
@@ -119,20 +151,40 @@ void PacketSniffer::capture_loop() {
             // 成功捕获到包
             total_packets_++;
             process_packet(header, packet);
+            
+            // 每1000个包输出一次统计信息
+            auto current_time = std::chrono::steady_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(current_time - last_stats_time);
+            
+            if (duration.count() >= 30) {  // 每30秒输出一次统计
+                size_t current_total = total_packets_.load();
+                size_t current_filtered = filtered_packets_.load();
+                size_t packets_per_sec = (current_total - last_total_packets) / std::max(1, (int)duration.count());
+                
+                std::cout << "[Packet Sniffer] 📊 Stats - Total: " << current_total 
+                         << ", Filtered: " << current_filtered 
+                         << ", Rate: " << packets_per_sec << " pps" << std::endl;
+                
+                last_stats_time = current_time;
+                last_total_packets = current_total;
+            }
+            
         } else if (result == 0) {
             // 超时，继续循环
             continue;
         } else if (result == -1) {
             // 错误
-            std::cerr << "[Packet Sniffer] Error reading packet: " << pcap_geterr(handle_) << std::endl;
+            std::cerr << "[Packet Sniffer] ❌ Error reading packet: " << pcap_geterr(handle_) << std::endl;
             break;
         } else if (result == -2) {
             // 到达文件末尾或pcap_breakloop被调用
+            std::cout << "[Packet Sniffer] 🛑 Capture stopped (pcap_breakloop called)" << std::endl;
             break;
         }
     }
     
-    std::cout << "[Packet Sniffer] Capture loop ended" << std::endl;
+    std::cout << "[Packet Sniffer] 🔚 Capture loop ended - Total packets: " << total_packets_.load() 
+              << ", Filtered packets: " << filtered_packets_.load() << std::endl;
 }
 
 void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_char* packet) {
@@ -169,6 +221,13 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
         
         if (arp_opcode == 1) {  // ARP请求 (1=请求, 2=应答)
             filtered_packets_++;
+            
+            // 🔧 每捕获10个ARP包输出一次调试信息
+            static size_t arp_debug_counter = 0;
+            if (++arp_debug_counter % 10 == 1) {
+                std::cout << "[PacketSniffer] 📡 ARP Request captured: " << src_ip << " -> " << dst_ip 
+                         << " (Total ARP packets: " << arp_debug_counter << ")" << std::endl;
+            }
             
             // 静默发送到Python，只在失败时输出错误
             if (!ipc_manager_->send_packet(pkt_info)) {

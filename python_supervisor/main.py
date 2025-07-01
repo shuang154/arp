@@ -198,10 +198,8 @@ class PythonSupervisor:
                     self.logger.error("❌ Failed to initialize packet sniffer")
                     return False
 
-            # ★ 关键修正: 初始化ZMQ数据包接收器
-            self.logger.info(f"🔌 Initializing packet receiver on {self.config.ipc.packet_address}")
-            self.packet_receiver_socket = self.zmq_context.socket(zmq.PULL)
-            self.packet_receiver_socket.bind(self.config.ipc.packet_address)
+            # ★ ZMQ套接字将在packet_receiver_loop中初始化
+            self.logger.info(f"🔌 ZMQ packet stream will connect to: {self.config.ipc.packet_address}")
             
             self.logger.info("✅ Python Supervisor initialized successfully")
             return True
@@ -214,6 +212,20 @@ class PythonSupervisor:
         """★ 关键修正: 在专用线程中接收和处理来自C++核心的数据包"""
         self.logger.info("📡 Packet receiver thread started...")
         
+        # 连接到C++核心的ZMQ套接字
+        try:
+            self.packet_receiver_socket = self.zmq_context.socket(zmq.SUB)
+            self.packet_receiver_socket.connect(self.config.ipc.packet_address)
+            self.packet_receiver_socket.setsockopt(zmq.SUBSCRIBE, b"")  # 订阅所有消息
+            self.logger.info(f"📡 Connected to packet stream: {self.config.ipc.packet_address}")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to connect to packet stream: {e}")
+            return
+        
+        # 统计变量
+        last_stats_time = time.time()
+        last_packet_count = 0
+        
         while self.running:
             try:
                 # 使用poll避免永久阻塞
@@ -221,6 +233,17 @@ class PythonSupervisor:
                     # 接收来自C++的JSON字符串
                     packet_json = self.packet_receiver_socket.recv_string()
                     self.stats['packets_received'] += 1
+                    
+                    # 🔧 每100个包输出一次接收统计
+                    current_time = time.time()
+                    if current_time - last_stats_time >= 30:  # 每30秒统计一次
+                        current_count = self.stats['packets_received']
+                        packets_per_sec = (current_count - last_packet_count) / 30
+                        self.logger.info(f"📊 ZMQ Reception - Total received: {current_count}, "
+                                       f"Rate: {packets_per_sec:.1f} pps, "
+                                       f"Analyzed: {self.stats['packets_analyzed']}")
+                        last_stats_time = current_time
+                        last_packet_count = current_count
                     
                     # 分析数据包
                     analysis_result = self.packet_analyzer.analyze(packet_json)
@@ -239,15 +262,27 @@ class PythonSupervisor:
                                 self.logger.info(f"🔄 恢复网络连接: {decision.target_ip}")
                                 # 恢复ARP
                                 self._execute_restore_decision(decision)
+                else:
+                    # 超时，检查是否还有其他工作要做
+                    pass
                                 
             except zmq.ZMQError as e:
                 if e.errno == zmq.ETERM:
-                    self.logger.warning("ZMQ context terminated, exiting receiver loop.")
+                    self.logger.warning("🔌 ZMQ context terminated, exiting receiver loop.")
                     break
                 else:
-                    self.logger.error(f"ZMQ error in receiver loop: {e}")
+                    self.logger.error(f"❌ ZMQ error in receiver loop: {e}")
             except Exception as e:
-                self.logger.error(f"Error in packet receiver loop: {e}", exc_info=True)
+                self.logger.error(f"❌ Error in packet receiver loop: {e}", exc_info=True)
+        
+        # 清理ZMQ套接字
+        try:
+            if self.packet_receiver_socket:
+                self.packet_receiver_socket.close()
+        except Exception as e:
+            self.logger.error(f"❌ Error closing packet receiver socket: {e}")
+        
+        self.logger.info("📡 Packet receiver thread stopped")
         
         self.logger.info("📡 Packet receiver thread stopped.")
 
@@ -326,27 +361,74 @@ class PythonSupervisor:
             return
         self.running = False
 
-        # ★ 关键修正: 停止接收线程
-        if self.packet_receiver_thread and self.packet_receiver_thread.is_alive():
-            self.packet_receiver_thread.join(timeout=2)
+        # 1. 停止所有正在进行的攻击
+        if hasattr(self, 'attack_coordinator') and self.attack_coordinator:
+            try:
+                self.logger.info("🔥 Stopping all active attacks...")
+                self.attack_coordinator.stop_all_attacks()
+            except Exception as e:
+                self.logger.error(f"Error stopping attacks: {e}")
 
-        # ★ 关键修正: 关闭ZMQ套接字和上下文
-        if self.packet_receiver_socket:
-            self.packet_receiver_socket.close()
-        if self.zmq_context:
-            self.zmq_context.term()
-
-        # 停止ARP欺骗器
-        if hasattr(self, 'arp_spoofer') and self.arp_spoofer:
-            self.arp_spoofer.shutdown()
-        # 停止数据包嗅探器
+        # 2. 停止数据包嗅探器
         if hasattr(self, 'packet_sniffer') and self.packet_sniffer:
-            self.packet_sniffer.stop_capture()
-        # 等待监控线程结束
-        if self.monitor_thread and self.monitor_thread.is_alive():
+            try:
+                self.logger.info("📡 Stopping packet sniffer...")
+                self.packet_sniffer.stop_capture()
+            except Exception as e:
+                self.logger.error(f"Error stopping packet sniffer: {e}")
+
+        # 3. ★ 关键修正: 停止接收线程
+        if self.packet_receiver_thread and self.packet_receiver_thread.is_alive():
+            self.logger.info("🔄 Waiting for packet receiver thread to stop...")
+            self.packet_receiver_thread.join(timeout=3)
+            if self.packet_receiver_thread.is_alive():
+                self.logger.warning("⚠️ Packet receiver thread did not stop gracefully")
+
+        # 4. 停止状态监控线程
+        if hasattr(self, 'status_monitor_thread') and self.status_monitor_thread and self.status_monitor_thread.is_alive():
+            self.logger.info("📊 Waiting for status monitor thread to stop...")
+            self.status_monitor_thread.join(timeout=2)
+            if self.status_monitor_thread.is_alive():
+                self.logger.warning("⚠️ Status monitor thread did not stop gracefully")
+
+        # 5. ★ 关键修正: 关闭ZMQ套接字和上下文
+        try:
+            if self.packet_receiver_socket:
+                self.logger.info("🔌 Closing ZMQ packet receiver socket...")
+                self.packet_receiver_socket.close()
+            if self.command_sender_socket:
+                self.logger.info("🔌 Closing ZMQ command sender socket...")
+                self.command_sender_socket.close()
+            if self.zmq_context:
+                self.logger.info("🔌 Terminating ZMQ context...")
+                self.zmq_context.term()
+        except Exception as e:
+            self.logger.error(f"Error closing ZMQ resources: {e}")
+
+        # 6. 停止ARP欺骗器
+        if hasattr(self, 'arp_spoofer') and self.arp_spoofer:
+            try:
+                self.logger.info("🏹 Shutting down ARP spoofer...")
+                self.arp_spoofer.shutdown()
+            except Exception as e:
+                self.logger.error(f"Error shutting down ARP spoofer: {e}")
+
+        # 7. 等待其他监控线程结束
+        if hasattr(self, 'monitor_thread') and self.monitor_thread and self.monitor_thread.is_alive():
+            self.logger.info("🔍 Waiting for monitor thread to stop...")
             self.monitor_thread.join(timeout=2)
+            if self.monitor_thread.is_alive():
+                self.logger.warning("⚠️ Monitor thread did not stop gracefully")
+
+        # 8. 停止Web API (如果启用)
+        if hasattr(self, 'web_api') and self.web_api:
+            try:
+                self.logger.info("🌐 Stopping Web API...")
+                self.web_api.shutdown()
+            except Exception as e:
+                self.logger.error(f"Error stopping Web API: {e}")
         
-        self.logger.info("✅ Shutdown complete.")
+        self.logger.info("✅ Shutdown complete - all components stopped.")
 
     def get_statistics(self) -> Dict:
         """获取综合统计信息"""
@@ -436,8 +518,14 @@ def parse_arguments():
     return parser.parse_args()
 
 def signal_handler(signum, frame):
-    """信号处理器"""
-    print(f"\nReceived signal {signum}, shutting down...")
+    """信号处理器 - 优雅关闭所有组件"""
+    print(f"\nReceived signal {signum}, shutting down gracefully...")
+    
+    # 全局访问监督者实例以便优雅关闭
+    if hasattr(signal_handler, 'supervisor') and signal_handler.supervisor:
+        signal_handler.supervisor.shutdown()
+    
+    print("✅ Graceful shutdown completed.")
     sys.exit(0)
 
 def main():
@@ -488,6 +576,9 @@ def main():
         # 创建并运行监督者
         print("🔧 Creating PythonSupervisor...")
         supervisor = PythonSupervisor(config)
+        
+        # 将监督者实例传递给信号处理器
+        signal_handler.supervisor = supervisor
         
         print("🔧 Initializing supervisor...")
         if supervisor.initialize():

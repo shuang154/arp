@@ -397,10 +397,17 @@ build_cpp_core() {
 
 # 创建高性能配置文件（关闭Web功能）
 create_config() {
-    echo -e "${YELLOW}创建配置文件...${NC}"
-    
     mkdir -p "${CONFIG_DIR}"
     local config_file="${CONFIG_DIR}/config.yaml"
+    
+    # 检查是否已存在用户自定义配置文件
+    if [ -f "${config_file}" ]; then
+        echo -e "${GREEN}✓ 发现已有配置文件，保留用户自定义配置${NC}"
+        echo -e "${BLUE}配置文件位置: ${config_file}${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}创建默认配置文件...${NC}"
     
     cat > "${config_file}" << EOF
 # ARP Spoofer C++ Core 配置文件

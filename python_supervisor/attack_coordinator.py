@@ -188,18 +188,37 @@ class AttackCoordinator:
         except Exception as e:
             self.logger.error(f"Failed to save credentials: {e}")
     
+    def stop_all_attacks(self):
+        """停止所有正在进行的攻击"""
+        try:
+            self.logger.info("🛑 Stopping all active attacks...")
+            
+            # 向C++核心发送停止所有攻击的命令
+            command = {
+                'type': 'STOP_ALL_ATTACKS'
+            }
+            
+            if self.command_sender:
+                success = self.command_sender(command)
+                if success:
+                    self.logger.info("✅ Stop all attacks command sent successfully")
+                else:
+                    self.logger.error("❌ Failed to send stop all attacks command")
+            else:
+                self.logger.warning("⚠️ No command sender available")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error stopping all attacks: {e}")
+
     def get_statistics(self) -> Dict[str, Any]:
-        """获取协调器统计信息"""
+        """获取统计信息"""
         with self.stats_lock:
-            stats = dict(self.stats)
-        
-        # 添加状态缓存统计
-        cache_stats = self.state_cache.get_statistics()
-        stats.update({
-            'cache_' + k: v for k, v in cache_stats.items()
-        })
-        
-        return stats
+            return {
+                'decisions_made': self.stats['decisions_made'],
+                'attacks_authorized': self.stats['attacks_authorized'],
+                'attacks_blocked': self.stats['attacks_blocked'],
+                'restores_initiated': self.stats['restores_initiated']
+            }
     
     def set_command_sender(self, command_sender: Callable):
         """设置命令发送回调函数 - 用于向C++核心发送命令"""
