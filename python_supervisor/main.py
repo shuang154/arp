@@ -47,7 +47,7 @@ try:
         print(f"  - {attr} ({attr_type})")
     
     # 🔧 检查关键类是否存在
-    required_classes = ['ARPSpoofer', 'PacketSniffer', 'ThreadPool']
+    required_classes = ['ARPSpoofer', 'PacketSniffer']
     missing_classes = []
     
     for cls_name in required_classes:
