@@ -240,7 +240,12 @@ bool ARPSpoofer::send_arp_packet(const std::string& src_ip, const std::string& s
     // 发送包
     ssize_t sent = send(raw_socket_, packet, sizeof(packet), 0);
     if (sent < 0) {
-        std::cerr << "[ARP Spoofer] Failed to send ARP packet: " << strerror(errno) << std::endl;
+        std::cerr << "[ARP Spoofer] Failed to send ARP packet to " << dst_ip 
+                  << ": " << strerror(errno) << " (errno: " << errno << ")" << std::endl;
+        return false;
+    } else if (sent != sizeof(packet)) {
+        std::cerr << "[ARP Spoofer] Partial send: sent " << sent 
+                  << " bytes, expected " << sizeof(packet) << " bytes" << std::endl;
         return false;
     }
     
@@ -303,8 +308,13 @@ void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string
     
     std::cout << "[ARP Spoofer] Starting continuous attack on " << target_ip 
               << " (Thread Pool Mode)" << std::endl;
+    std::cout << "[ARP Spoofer] Attack params: target=" << target_ip 
+              << ", gateway=" << gateway_ip << ", my_mac=" << my_mac 
+              << ", target_mac=" << target_mac << ", gateway_mac=" << gateway_mac 
+              << ", raw_socket=" << raw_socket_ << std::endl;
     
     auto start_time = std::chrono::steady_clock::now();
+    auto last_stats_time = start_time;
     uint64_t packets_sent = 0;
     
     // 持续攻击循环
@@ -342,6 +352,15 @@ void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string
                     it->second->packets_sent = packets_sent;
                 }
             }
+            
+            // 前几次发送时输出调试信息
+            if (packets_sent <= 10) {
+                std::cout << "[ARP Spoofer] " << target_ip << " - Successfully sent packets " 
+                          << (packets_sent - 1) << " & " << packets_sent << std::endl;
+            }
+        } else {
+            std::cerr << "[ARP Spoofer] " << target_ip << " - Failed to send packets (success1=" 
+                      << success1 << ", success2=" << success2 << ")" << std::endl;
         }
         
         // 短暂延迟（高频攻击）
@@ -349,10 +368,14 @@ void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string
         
         // 每10秒输出一次统计信息
         auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-        if (elapsed > 0 && elapsed % 10 == 0) {
-            std::cout << "[ARP Spoofer] " << target_ip << " - 已发送 " << packets_sent 
-                      << " 个包，速率：" << (packets_sent / elapsed) << " pps" << std::endl;
+        auto stats_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_stats_time).count();
+        if (stats_elapsed >= 10) {
+            auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+            if (total_elapsed > 0) {
+                std::cout << "[ARP Spoofer] " << target_ip << " - 已发送 " << packets_sent 
+                          << " 个包，速率：" << (packets_sent / total_elapsed) << " pps" << std::endl;
+            }
+            last_stats_time = now;
         }
     }
     

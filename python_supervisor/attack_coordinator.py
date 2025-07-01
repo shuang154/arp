@@ -111,8 +111,6 @@ class AttackCoordinator:
         # 只输出关键的攻击决策日志
         self.logger.info(f"🔥 攻击决策: 目标 {target_ip} 已授权攻击 (持续{decision.duration}秒)")
         return decision
-        self.logger.info(f"Attack authorized for {target_ip} (ARP gateway query)")
-        return decision
     
     def _handle_http_analysis(self, analysis) -> Optional[AttackDecision]:
         """处理HTTP分析结果"""
