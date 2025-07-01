@@ -52,32 +52,23 @@ if(NOT ZMQ_INCLUDE_DIR OR NOT ZMQ_LIBRARY)
     message(FATAL_ERROR "ZeroMQ not found. Please install libzmq3-dev and cppzmq-dev")
 endif()
 
-# 查找RapidJSON
-find_path(RAPIDJSON_INCLUDE_DIR rapidjson/rapidjson.h)
-if(NOT RAPIDJSON_INCLUDE_DIR)
-    message(WARNING "RapidJSON not found, trying jsoncpp instead")
-    # 尝试查找jsoncpp
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(JSONCPP jsoncpp)
-    if(NOT JSONCPP_FOUND)
-        message(FATAL_ERROR "Neither RapidJSON nor jsoncpp found. Please install libjsoncpp-dev")
-    else()
-        set(USE_JSONCPP TRUE)
-        message(STATUS "Using jsoncpp instead of RapidJSON")
-    endif()
-endif()
+# 直接查找 jsoncpp（不使用 RapidJSON）
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONCPP REQUIRED jsoncpp)
+set(USE_JSONCPP TRUE)
+message(STATUS "Found jsoncpp: ${JSONCPP_VERSION}")
+message(STATUS "jsoncpp include dirs: ${JSONCPP_INCLUDE_DIRS}")
+message(STATUS "jsoncpp libraries: ${JSONCPP_LIBRARIES}")
+message(STATUS "jsoncpp library dirs: ${JSONCPP_LIBRARY_DIRS}")
 
 # 包含目录
 include_directories(${LIBPCAP_INCLUDE_DIRS})
 include_directories(${ZMQ_INCLUDE_DIR})
-
-if(USE_JSONCPP)
-    include_directories(${JSONCPP_INCLUDE_DIRS})
-else()
-    include_directories(${RAPIDJSON_INCLUDE_DIR})
-endif()
-
+include_directories(${JSONCPP_INCLUDE_DIRS})
 include_directories(src)
+
+# 添加库目录
+link_directories(${JSONCPP_LIBRARY_DIRS})
 
 # 源文件
 set(CORE_SOURCES
@@ -98,23 +89,17 @@ pybind11_add_module(arp_core_cpp src/python_bindings.cpp ${CORE_SOURCES})
 target_link_libraries(arp_core
     ${LIBPCAP_LIBRARIES}
     ${ZMQ_LIBRARY}
+    ${JSONCPP_LIBRARIES}
     pthread
 )
-
-if(USE_JSONCPP)
-    target_link_libraries(arp_core ${JSONCPP_LIBRARIES})
-endif()
 
 # 链接库 - Python模块
 target_link_libraries(arp_core_cpp PRIVATE
     ${LIBPCAP_LIBRARIES}
     ${ZMQ_LIBRARY}
+    ${JSONCPP_LIBRARIES}
     pthread
 )
-
-if(USE_JSONCPP)
-    target_link_libraries(arp_core_cpp PRIVATE ${JSONCPP_LIBRARIES})
-endif()
 
 # 编译选项
 target_compile_options(arp_core PRIVATE ${LIBPCAP_CFLAGS_OTHER})
