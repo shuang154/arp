@@ -221,13 +221,3 @@ std::string PacketSniffer::get_interface() const {
 bool PacketSniffer::is_running() const {
     return running_;
 }
-    
-    struct iphdr* ip_header = (struct iphdr*)(packet + sizeof(struct ethhdr));
-    if (ip_header->protocol != IPPROTO_TCP) return false;
-    
-    int ip_header_len = ip_header->ihl * 4;
-    struct tcphdr* tcp_header = (struct tcphdr*)(packet + sizeof(struct ethhdr) + ip_header_len);
-    
-    uint16_t dst_port = ntohs(tcp_header->dest);
-    return (dst_port == 80 || dst_port == 443 || dst_port == 8080 || dst_port == 801);
-}
