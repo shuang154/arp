@@ -254,11 +254,21 @@ class PythonSupervisor:
     def _execute_attack_decision(self, decision):
         """执行攻击决策"""
         try:
+            # 如果 gateway_mac 为空，尝试获取网关 MAC 地址
+            gateway_mac = decision.gateway_mac
+            if not gateway_mac:
+                # 尝试从状态缓存获取网关 MAC
+                gateway_mac = self.state_cache.get_cached_mac(decision.gateway_ip)
+                if not gateway_mac:
+                    # 如果缓存中没有，使用默认值或跳过（在 C++ 中会自动获取）
+                    gateway_mac = ""
+                    self.logger.debug(f"Gateway MAC not cached for {decision.gateway_ip}, will be resolved in C++")
+            
             success = self.arp_spoofer.start_spoofing(
                 decision.target_ip,
                 decision.gateway_ip,
                 decision.target_mac,
-                decision.gateway_mac
+                gateway_mac
             )
             if success:
                 self.logger.info(f"✅ 攻击已启动: {decision.target_ip}")

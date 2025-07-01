@@ -6,7 +6,7 @@ cd "D:\Desktop\我的项目\arp欺骗\arp_pro"
 git add .
 git commit -m "v4修复Claude"
 git push
-cd "D:\Desktop\我的项目\arp欺骗\arp_s"; git add .; git commit -m "cpp核心业务版本7"; git push            ***********
+cd "D:\Desktop\我的项目\arp欺骗\arp_s"; git add .; git commit -m "cpp核心业务版本修复py和cpp通讯9（上个版本正常嗅探无欺骗包发送）"; git push            ***********
 
 
 ⚠️ 如果还是提示无 upstream（一般不会再出现），就执行一次：
@@ -17,8 +17,17 @@ cd /home/zs/文档/projects/arp_s && git pull         ***********
 git checkout cpp
 git pull
 git pull origin cpp
+---------------------------------------
+修改代码：
+cd /home/zs/文档/projects/arp_s
+sudo ./scripts/build.sh -f    # -f 表示强制重构建
 
 
+cd d:\Desktop\我的项目\arp欺骗\arp_s
+sudo rm -rf cpp_core/build/
+sudo ./scripts/build.sh -f -i wlan0
+---------------------------------------
+覆盖本地git reset --hard HEAD
 
 可选检查指令
 查看当前分支：
