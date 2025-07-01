@@ -220,24 +220,31 @@ class PythonSupervisor:
                 if self.packet_receiver_socket.poll(timeout=1000):  # 1秒超时
                     # 接收来自C++的JSON字符串
                     packet_json = self.packet_receiver_socket.recv_string()
-                    self.logger.debug(f"📦 Received packet: {packet_json[:100]}...")
+                    self.logger.info(f"📦 Received packet: {packet_json[:100]}...")
+                    self.stats['packets_received'] += 1
                     
                     # 分析数据包
                     analysis_result = self.packet_analyzer.analyze(packet_json)
                     if analysis_result:
                         self.logger.info(f"🔍 Analysis result: {analysis_result}")
+                        self.stats['packets_analyzed'] += 1
                         
                         # 交给协调器做决策
                         decision = self.attack_coordinator.make_decision(analysis_result)
                         if decision:
                             if decision.action == 'attack':
                                 self.logger.info(f"🛡️ Starting attack on {decision.target_ip}")
+                                self.stats['attacks_triggered'] += 1
                                 # 启动攻击
                                 self._execute_attack_decision(decision)
                             elif decision.action == 'restore':
                                 self.logger.info(f"✅ Restoring ARP for {decision.target_ip}")
                                 # 恢复ARP
                                 self._execute_restore_decision(decision)
+                else:
+                    # 超时，输出调试信息
+                    if self.stats['packets_received'] % 100 == 0:  # 每100次超时输出一次
+                        self.logger.debug("ZMQ timeout - no packets received from C++")
                                 
             except zmq.ZMQError as e:
                 if e.errno == zmq.ETERM:

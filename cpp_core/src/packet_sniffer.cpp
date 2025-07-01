@@ -164,8 +164,11 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
         filtered_packets_++;
         
         // 发送到Python进行分析
+        std::cout << "[PacketSniffer] Sending ARP packet to Python: " << src_ip << " -> " << dst_ip << std::endl;
         if (!ipc_manager_->send_packet(pkt_info)) {
-            // 发送失败，可能是缓冲区满，这在高频情况下是正常的
+            std::cout << "[PacketSniffer] Failed to send ARP packet to Python" << std::endl;
+        } else {
+            std::cout << "[PacketSniffer] Successfully sent ARP packet to Python" << std::endl;
         }
         
     } else if (ether_type == ETHERTYPE_IP) {
@@ -198,8 +201,11 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
                 pkt_info.raw_data = std::string((char*)packet, std::min((int)header->len, 200)); // 只保存前200字节
                 
                 // 发送到Python进行分析
+                std::cout << "[PacketSniffer] Sending TCP packet to Python: " << src_ip << ":" << src_port << " -> " << dst_ip << ":" << dst_port << std::endl;
                 if (!ipc_manager_->send_packet(pkt_info)) {
-                    // 发送失败处理
+                    std::cout << "[PacketSniffer] Failed to send TCP packet to Python" << std::endl;
+                } else {
+                    std::cout << "[PacketSniffer] Successfully sent TCP packet to Python" << std::endl;
                 }
             }
         }
