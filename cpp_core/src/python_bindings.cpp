@@ -15,7 +15,7 @@ PYBIND11_MODULE(arp_core_cpp, m) {
         .def(py::init<const std::string&>())
         .def("initialize", &PacketSniffer::initialize, 
              "Initialize packet sniffer with IPC addresses",
-             py::arg("packet_addr") = "", py::arg("command_addr") = "")
+             py::arg("packet_addr"), py::arg("command_addr"))
         .def("start_capture", &PacketSniffer::start_capture)
         .def("stop_capture", &PacketSniffer::stop_capture)
         .def("get_total_packets", &PacketSniffer::get_total_packets)

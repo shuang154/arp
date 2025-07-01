@@ -11,8 +11,8 @@ public:
     explicit PacketSniffer(const std::string& interface);
     ~PacketSniffer();
     
-    // ★ 关键修正: 修改初始化方法签名
-    bool initialize(const std::string& packet_addr = "", const std::string& command_addr = "");
+    // ★ 关键修正: 修改初始化方法签名以接受两个必需参数
+    bool initialize(const std::string& packet_addr, const std::string& command_addr);
     bool start_capture();
     void stop_capture();
     

@@ -5,7 +5,7 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
-#include <net/ethernet.h>
+#include <netinet/if_ether.h>
 #include <net/if_arp.h>
 #include <arpa/inet.h>
 #include <cstring>
@@ -24,6 +24,7 @@ PacketSniffer::~PacketSniffer() {
 // ★ 关键修正: 修改初始化方法以接受IPC配置
 bool PacketSniffer::initialize(const std::string& packet_addr, const std::string& command_addr) {
     std::cout << "[Packet Sniffer] Initializing on interface " << interface_ << std::endl;
+    std::cout << "[Packet Sniffer] IPC - Packet: " << packet_addr << ", Command: " << command_addr << std::endl;
     
     // ★ 使用传入的地址初始化IPC管理器
     if (!ipc_manager_->initialize(packet_addr, command_addr)) {
