@@ -112,6 +112,7 @@ class PythonSupervisor:
         self.packet_receiver_socket = None
         self.command_sender_socket = None
         self.packet_receiver_thread = None
+        self.status_monitor_thread = None  # 添加状态监控线程
         
         # ★ 关键修正：初始化分析和协调组件
         self.state_cache = StateCache()
@@ -362,10 +363,48 @@ class PythonSupervisor:
                 stats['cpp_processor'] = {'error': str(e)}
                 
         return stats
+    
     def shutdown(self):
         """关闭系统 - _shutdown 的别名"""
         self._shutdown()
         
+    def _start_monitoring(self):
+        """启动监控线程"""
+        self.logger.info("🔍 Starting monitoring threads...")
+        
+        # 启动状态监控线程
+        self.status_monitor_thread = threading.Thread(
+            target=self._status_monitor_loop,
+            name="StatusMonitor"
+        )
+        self.status_monitor_thread.daemon = True
+        self.status_monitor_thread.start()
+        self.logger.info("✅ Status monitor started")
+
+    def _status_monitor_loop(self):
+        """状态监控循环"""
+        last_report = time.time()
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                # 每60秒输出一次状态
+                if current_time - last_report >= 60:
+                    total_packets = getattr(self.packet_sniffer, 'get_total_packets', lambda: 0)()
+                    filtered_packets = getattr(self.packet_sniffer, 'get_filtered_packets', lambda: 0)()
+                    
+                    self.logger.info(f"📊 Status - Total packets: {total_packets}, "
+                                   f"Filtered: {filtered_packets}, "
+                                   f"Active sessions: {len(getattr(self.arp_spoofer, 'get_active_targets', lambda: [])())}")
+                    last_report = current_time
+                
+                time.sleep(5)  # 每5秒检查一次
+                
+            except Exception as e:
+                if self.running:  # 只在运行时记录错误
+                    self.logger.warning(f"Status monitor error: {e}")
+                time.sleep(10)
+
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="ARP Spoofer Python Supervisor")
