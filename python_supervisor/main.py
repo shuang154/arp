@@ -220,31 +220,25 @@ class PythonSupervisor:
                 if self.packet_receiver_socket.poll(timeout=1000):  # 1秒超时
                     # 接收来自C++的JSON字符串
                     packet_json = self.packet_receiver_socket.recv_string()
-                    self.logger.info(f"📦 Received packet: {packet_json[:100]}...")
                     self.stats['packets_received'] += 1
                     
                     # 分析数据包
                     analysis_result = self.packet_analyzer.analyze(packet_json)
                     if analysis_result:
-                        self.logger.info(f"🔍 Analysis result: {analysis_result}")
                         self.stats['packets_analyzed'] += 1
                         
                         # 交给协调器做决策
                         decision = self.attack_coordinator.make_decision(analysis_result)
                         if decision:
                             if decision.action == 'attack':
-                                self.logger.info(f"🛡️ Starting attack on {decision.target_ip}")
+                                self.logger.info(f"🎯 开始攻击目标: {decision.target_ip}")
                                 self.stats['attacks_triggered'] += 1
                                 # 启动攻击
                                 self._execute_attack_decision(decision)
                             elif decision.action == 'restore':
-                                self.logger.info(f"✅ Restoring ARP for {decision.target_ip}")
+                                self.logger.info(f"🔄 恢复网络连接: {decision.target_ip}")
                                 # 恢复ARP
                                 self._execute_restore_decision(decision)
-                else:
-                    # 超时，输出调试信息
-                    if self.stats['packets_received'] % 100 == 0:  # 每100次超时输出一次
-                        self.logger.debug("ZMQ timeout - no packets received from C++")
                                 
             except zmq.ZMQError as e:
                 if e.errno == zmq.ETERM:
@@ -267,9 +261,9 @@ class PythonSupervisor:
                 decision.gateway_mac
             )
             if success:
-                self.logger.info(f"✅ Attack started successfully on {decision.target_ip}")
+                self.logger.info(f"✅ 攻击已启动: {decision.target_ip}")
             else:
-                self.logger.error(f"❌ Failed to start attack on {decision.target_ip}")
+                self.logger.error(f"❌ 攻击启动失败: {decision.target_ip}")
         except Exception as e:
             self.logger.error(f"Error executing attack: {e}", exc_info=True)
 
@@ -283,9 +277,9 @@ class PythonSupervisor:
                 decision.gateway_mac
             )
             if success:
-                self.logger.info(f"✅ ARP restored successfully for {decision.target_ip}")
+                self.logger.info(f"✅ 网络已恢复: {decision.target_ip}")
             else:
-                self.logger.error(f"❌ Failed to restore ARP for {decision.target_ip}")
+                self.logger.error(f"❌ 网络恢复失败: {decision.target_ip}")
         except Exception as e:
             self.logger.error(f"Error executing restore: {e}", exc_info=True)
 

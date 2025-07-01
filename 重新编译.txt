@@ -1,0 +1,40 @@
+ARP 欺骗项目 - 重新编译指令
+============================
+
+由于修改了以下 C++ 代码：
+- PacketInfo 结构体添加了 type 和 arp_opcode 字段
+- 数据包处理逻辑增强了类型识别
+- IPC 序列化包含新字段
+- 日志输出优化
+
+需要执行以下编译步骤：
+
+1. 完全清理旧版本：
+   cd d:\Desktop\我的项目\arp欺骗\arp_s
+   sudo rm -rf cpp_core/build/
+   sudo find python_supervisor/ -name "*.so" -delete
+   sudo find python_supervisor/ -name "*.pyd" -delete
+
+2. 重新编译（强制构建）：
+   sudo ./scripts/build.sh -f -i wlan0
+   
+   或者如果要清理虚拟环境：
+   sudo ./scripts/build.sh -c -f -i wlan0
+
+3. 如果遇到权限问题：
+   sudo chown -R $USER:$USER .
+   sudo ./scripts/build.sh -f -i wlan0
+
+编译完成后，新版本将：
+✅ C++ 正确发送带有类型字段的数据包给 Python
+✅ Python 能识别 ARP 请求并触发攻击决策
+✅ 只显示关键日志：攻击目标、攻击启动、网络恢复
+✅ 减少99%的冗余调试信息
+
+预期的日志输出示例：
+[PacketAnalyzer] 🎯 发现攻击目标: 192.168.1.100 正在查询网关 192.168.1.1
+[AttackCoordinator] 🔥 攻击决策: 目标 192.168.1.100 已授权攻击 (持续30秒)
+[PythonSupervisor] 🎯 开始攻击目标: 192.168.1.100
+[PythonSupervisor] ✅ 攻击已启动: 192.168.1.100
+[PythonSupervisor] 🔄 恢复网络连接: 192.168.1.100
+[PythonSupervisor] ✅ 网络已恢复: 192.168.1.100

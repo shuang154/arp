@@ -13,6 +13,8 @@ struct PacketInfo {
     std::string protocol;
     int packet_size;
     std::string raw_data;
+    int type = 0;  // ★ 新增：数据包类型 (1=ARP, 2=HTTP/TCP)
+    int arp_opcode = 0;  // ★ 新增：ARP操作码 (1=请求, 2=应答)
 };
 
 class IPCManager {

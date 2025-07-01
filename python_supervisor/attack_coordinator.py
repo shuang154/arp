@@ -75,8 +75,6 @@ class AttackCoordinator:
         if not self.state_cache.should_attack_target(target_ip):
             with self.stats_lock:
                 self.stats['attacks_blocked'] += 1
-                
-            self.logger.debug(f"Attack blocked for {target_ip} (cache hit or active attack)")
             return AttackDecision(
                 action='ignore',
                 target_ip=target_ip,
@@ -100,7 +98,7 @@ class AttackCoordinator:
             gateway_mac='',  # 将在执行时获取
             duration=self.config.attack.attack_timeout,
             attack_type='stealth' if self.config.attack.stealth_mode else 'standard',
-            reason='arp_gateway_query'
+            reason='gateway_arp_query'
         )
         
         # 开始攻击会话跟踪
@@ -110,6 +108,9 @@ class AttackCoordinator:
             decision.attack_type
         )
         
+        # 只输出关键的攻击决策日志
+        self.logger.info(f"🔥 攻击决策: 目标 {target_ip} 已授权攻击 (持续{decision.duration}秒)")
+        return decision
         self.logger.info(f"Attack authorized for {target_ip} (ARP gateway query)")
         return decision
     

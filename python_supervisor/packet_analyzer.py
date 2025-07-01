@@ -127,7 +127,8 @@ class PacketAnalyzer:
                 }
             )
             
-            self.logger.debug(f"ARP analysis: {src_ip} -> {dst_ip} (gateway query: {gateway_query})")
+            # 只有发现攻击目标时才输出日志
+            self.logger.info(f"🎯 发现攻击目标: {src_ip} 正在查询网关 {dst_ip}")
             return result
             
         except Exception as e:

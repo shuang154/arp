@@ -117,6 +117,8 @@ std::string IPCManager::serialize_packet(const PacketInfo& packet) {
     json_packet["protocol"] = packet.protocol;
     json_packet["packet_size"] = packet.packet_size;
     json_packet["raw_data"] = packet.raw_data;
+    json_packet["type"] = packet.type;  // ★ 新增：包含数据包类型
+    json_packet["arp_opcode"] = packet.arp_opcode;  // ★ 新增：ARP操作码
     
     Json::StreamWriterBuilder builder;
     return Json::writeString(builder, json_packet);

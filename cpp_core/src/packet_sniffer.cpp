@@ -151,6 +151,8 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
     
     if (ether_type == ETHERTYPE_ARP) {
         pkt_info.protocol = "ARP";
+        pkt_info.type = 1;  // ★ 设置为ARP类型
+        
         // 解析ARP包
         struct ether_arp* arp_header = (struct ether_arp*)(packet + sizeof(struct ether_header));
         
@@ -161,14 +163,18 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
         pkt_info.src_ip = src_ip;
         pkt_info.dst_ip = dst_ip;
         
-        filtered_packets_++;
+        // ★ 关键修正：添加 ARP 操作码信息 
+        uint16_t arp_opcode = ntohs(arp_header->ea_hdr.ar_op);
+        pkt_info.arp_opcode = arp_opcode;  // ★ 设置操作码到数据结构
         
-        // 发送到Python进行分析
-        std::cout << "[PacketSniffer] Sending ARP packet to Python: " << src_ip << " -> " << dst_ip << std::endl;
-        if (!ipc_manager_->send_packet(pkt_info)) {
-            std::cout << "[PacketSniffer] Failed to send ARP packet to Python" << std::endl;
-        } else {
-            std::cout << "[PacketSniffer] Successfully sent ARP packet to Python" << std::endl;
+        if (arp_opcode == 1) {  // ARP请求 (1=请求, 2=应答)
+            filtered_packets_++;
+            
+            // 静默发送到Python，只在失败时输出错误
+            if (!ipc_manager_->send_packet(pkt_info)) {
+                std::cout << "[PacketSniffer] ❌ Failed to send ARP packet: " << src_ip << " -> " << dst_ip << std::endl;
+            }
+            // 成功时不输出日志，减少冗余
         }
         
     } else if (ether_type == ETHERTYPE_IP) {
@@ -184,6 +190,7 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
         
         if (ip_header->protocol == IPPROTO_TCP) {
             pkt_info.protocol = "TCP";
+            pkt_info.type = 2;  // ★ 设置为HTTP/TCP类型
             
             // 可以进一步解析TCP头以获取端口信息
             struct tcphdr* tcp_header = (struct tcphdr*)(packet + sizeof(struct ether_header) + (ip_header->ihl * 4));
@@ -200,13 +207,11 @@ void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_cha
                 // 如果需要，可以提取HTTP数据等
                 pkt_info.raw_data = std::string((char*)packet, std::min((int)header->len, 200)); // 只保存前200字节
                 
-                // 发送到Python进行分析
-                std::cout << "[PacketSniffer] Sending TCP packet to Python: " << src_ip << ":" << src_port << " -> " << dst_ip << ":" << dst_port << std::endl;
+                // 静默发送到Python，只在失败时输出错误
                 if (!ipc_manager_->send_packet(pkt_info)) {
-                    std::cout << "[PacketSniffer] Failed to send TCP packet to Python" << std::endl;
-                } else {
-                    std::cout << "[PacketSniffer] Successfully sent TCP packet to Python" << std::endl;
+                    std::cout << "[PacketSniffer] ❌ Failed to send TCP packet: " << src_ip << ":" << src_port << " -> " << dst_ip << ":" << dst_port << std::endl;
                 }
+                // 成功时不输出日志，减少冗余
             }
         }
     }
