@@ -1,51 +1,37 @@
-#ifndef PACKET_SNIFFER_H
-#define PACKET_SNIFFER_H
-
-#include <pcap.h>
+#pragma once
+#include "ipc_manager.h"
 #include <string>
-#include <atomic>
 #include <memory>
-
-class IPCManager;
+#include <thread>
+#include <atomic>
+#include <pcap.h>
 
 class PacketSniffer {
+public:
+    explicit PacketSniffer(const std::string& interface);
+    ~PacketSniffer();
+    
+    // ★ 关键修正: 修改初始化方法签名
+    bool initialize(const std::string& packet_addr = "", const std::string& command_addr = "");
+    bool start_capture();
+    void stop_capture();
+    
+    // 统计信息
+    size_t get_total_packets() const;
+    size_t get_filtered_packets() const;
+    std::string get_interface() const;
+    bool is_running() const;
+
 private:
     std::string interface_;
     pcap_t* handle_;
-    IPCManager* ipc_manager_;
+    std::unique_ptr<std::thread> capture_thread_;
+    std::unique_ptr<IPCManager> ipc_manager_;
+    
     std::atomic<bool> running_;
+    std::atomic<size_t> total_packets_;
+    std::atomic<size_t> filtered_packets_;
     
-    // 统计信息
-    std::atomic<uint64_t> packets_captured_;
-    std::atomic<uint64_t> packets_dropped_;
-    
-public:
-    PacketSniffer(const std::string& interface, IPCManager* ipc = nullptr);
-    ~PacketSniffer();
-    
-    bool initialize();
-    bool initialize_with_ipc(const std::string& packet_addr, const std::string& command_addr);
-    void start_sniffing();
-    void stop();
-    
-    // 新增：简化接口，用于Python绑定
-    bool start_capture() { start_sniffing(); return true; }
-    bool stop_capture() { stop(); return true; }
-    uint64_t get_packet_count() const { return packets_captured_; }
-    uint64_t get_arp_packet_count() const { return packets_captured_; } // 简化版本
-    
-    // 静态回调函数
-    static void packet_handler(u_char* user, const struct pcap_pkthdr* header, 
-                              const u_char* packet);
-    
-    // 获取统计信息
-    uint64_t get_packets_captured() const { return packets_captured_; }
-    uint64_t get_packets_dropped() const { return packets_dropped_; }
-
-private:
+    void capture_loop();
     void process_packet(const struct pcap_pkthdr* header, const u_char* packet);
-    bool is_arp_packet(const u_char* packet, int len);
-    bool is_http_packet(const u_char* packet, int len);
 };
-
-#endif // PACKET_SNIFFER_H

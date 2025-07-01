@@ -3,51 +3,46 @@
 #include <pybind11/chrono.h>
 #include "arp_spoofer.h"
 #include "packet_sniffer.h"
-#include "thread_pool.h"
-#include "utils.h"  // 添加utils头文件
+#include "ipc_manager.h"
 
 namespace py = pybind11;
 
-/**
- * Python绑定 - 将C++高性能核心暴露给Python
- * 这样Python supervisor可以调用C++核心，获得真正的高性能
- */
-
 PYBIND11_MODULE(arp_core_cpp, m) {
-    m.doc() = "ARP Spoofer C++ Core - High Performance Thread Pool Implementation";
+    m.doc() = "ARP Spoofer C++ Core Module";
     
-    // 🔧 版本信息（放在模块开始处，确保优先加载）
-    m.attr("__version__") = "3.0.0";
-    m.attr("__description__") = "High Performance ARP Spoofer with C++ Core - Real Network Only, No Simulation";
-    m.attr("__author__") = "ARP Spoofer Team";
+    // ★ 关键修正: 更新 PacketSniffer 绑定以匹配新的初始化方法
+    py::class_<PacketSniffer>(m, "PacketSniffer")
+        .def(py::init<const std::string&>())
+        .def("initialize", &PacketSniffer::initialize, 
+             "Initialize packet sniffer with IPC addresses",
+             py::arg("packet_addr") = "", py::arg("command_addr") = "")
+        .def("start_capture", &PacketSniffer::start_capture)
+        .def("stop_capture", &PacketSniffer::stop_capture)
+        .def("get_total_packets", &PacketSniffer::get_total_packets)
+        .def("get_filtered_packets", &PacketSniffer::get_filtered_packets)
+        .def("get_interface", &PacketSniffer::get_interface)
+        .def("is_running", &PacketSniffer::is_running);
     
-    // 线程池统计结构
-    py::class_<HighPerformanceThreadPool>(m, "ThreadPool")
-        .def(py::init<size_t>(), "创建线程池", py::arg("num_threads") = std::thread::hardware_concurrency())
-        .def("start", &HighPerformanceThreadPool::start, "启动线程池")
-        .def("stop", &HighPerformanceThreadPool::stop, "停止线程池")
-        .def("get_thread_count", &HighPerformanceThreadPool::get_thread_count, "获取线程数")
-        .def("get_tasks_completed", &HighPerformanceThreadPool::get_tasks_completed, "获取已完成任务数")
-        .def("get_tasks_assigned", &HighPerformanceThreadPool::get_tasks_assigned, "获取已分配任务数")
-        .def("get_completion_rate", &HighPerformanceThreadPool::get_completion_rate, "获取完成率")
-        .def("get_queue_sizes", &HighPerformanceThreadPool::get_queue_sizes, "获取各线程队列大小");
-    
-    // ARP欺骗器主类
     py::class_<ARPSpoofer>(m, "ARPSpoofer")
-        .def(py::init<const std::string&>(), "创建ARP欺骗器", py::arg("interface"))
-        .def("initialize", &ARPSpoofer::initialize, "初始化ARP欺骗器")
-        .def("shutdown", &ARPSpoofer::shutdown, "关闭ARP欺骗器")
-        .def("start_spoofing", &ARPSpoofer::start_spoofing, 
-             "开始ARP欺骗攻击",
-             py::arg("target_ip"), py::arg("gateway_ip"), 
-             py::arg("target_mac"), py::arg("gateway_mac"))
-        .def("stop_spoofing", &ARPSpoofer::stop_spoofing, 
-             "停止ARP欺骗攻击", py::arg("target_ip"))
-        .def("restore_arp", &ARPSpoofer::restore_arp,
-             "恢复ARP表",
-             py::arg("target_ip"), py::arg("gateway_ip"),
-             py::arg("target_mac"), py::arg("gateway_mac"))
-        .def("get_total_packets_sent", &ARPSpoofer::get_total_packets_sent, "获取总发送包数")
+        .def(py::init<const std::string&>())
+        .def("initialize", &ARPSpoofer::initialize)
+        .def("shutdown", &ARPSpoofer::shutdown)
+        .def("start_spoofing", &ARPSpoofer::start_spoofing)
+        .def("stop_spoofing", &ARPSpoofer::stop_spoofing)
+        .def("restore_arp", &ARPSpoofer::restore_arp)
+        .def("get_active_sessions_count", &ARPSpoofer::get_active_sessions_count)
+        .def("get_active_targets", &ARPSpoofer::get_active_targets)
+        .def("get_thread_pool_queue_sizes", &ARPSpoofer::get_thread_pool_queue_sizes)
+        .def("get_thread_pool_completion_rate", &ARPSpoofer::get_thread_pool_completion_rate);
+    
+    // ★ 关键修正: 更新 IPCManager 绑定
+    py::class_<IPCManager>(m, "IPCManager")
+        .def(py::init<>())
+        .def("initialize", &IPCManager::initialize)
+        .def("shutdown", &IPCManager::shutdown)
+        .def("get_packets_sent", &IPCManager::get_packets_sent)
+        .def("get_commands_sent", &IPCManager::get_commands_sent);
+}
         .def("get_total_sessions", &ARPSpoofer::get_total_sessions, "获取总会话数")
         .def("get_active_sessions_count", &ARPSpoofer::get_active_sessions_count, "获取活跃会话数")
         .def("get_active_targets", &ARPSpoofer::get_active_targets, "获取活跃目标列表")

@@ -1,261 +1,225 @@
 #include "packet_sniffer.h"
-#include "ipc_manager.h"
+#include "utils.h"
 #include <iostream>
-#include <cstring>
-#include <netinet/if_ether.h>
+#include <pcap.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <net/ethernet.h>
+#include <net/if_arp.h>
 #include <arpa/inet.h>
-#include <iomanip> // For std::setprecision and std::fixed
+#include <cstring>
 
-PacketSniffer::PacketSniffer(const std::string& interface, IPCManager* ipc)
-    : interface_(interface), handle_(nullptr), ipc_manager_(ipc), 
-      running_(false), packets_captured_(0), packets_dropped_(0) {
+PacketSniffer::PacketSniffer(const std::string& interface) 
+    : interface_(interface), handle_(nullptr), capture_thread_(nullptr), 
+      running_(false), total_packets_(0), filtered_packets_(0) {
+    
+    ipc_manager_ = std::make_unique<IPCManager>();
 }
 
 PacketSniffer::~PacketSniffer() {
-    stop();
+    stop_capture();
 }
 
-bool PacketSniffer::initialize() {
+// ★ 关键修正: 修改初始化方法以接受IPC配置
+bool PacketSniffer::initialize(const std::string& packet_addr, const std::string& command_addr) {
+    std::cout << "[Packet Sniffer] Initializing on interface " << interface_ << std::endl;
+    
+    // ★ 使用传入的地址初始化IPC管理器
+    if (!ipc_manager_->initialize(packet_addr, command_addr)) {
+        std::cerr << "[Packet Sniffer] Failed to initialize IPC manager" << std::endl;
+        return false;
+    }
+    
     char errbuf[PCAP_ERRBUF_SIZE];
     
-    // 创建捕获句柄
-    handle_ = pcap_create(interface_.c_str(), errbuf);
+    // 打开网络接口进行捕获
+    handle_ = pcap_open_live(interface_.c_str(), 65536, 1, 1000, errbuf);
     if (!handle_) {
-        std::cerr << "[Sniffer] Failed to create pcap handle: " << errbuf << std::endl;
+        std::cerr << "[Packet Sniffer] Could not open device " << interface_ 
+                  << ": " << errbuf << std::endl;
         return false;
     }
     
-    // 设置立即模式以降低延迟
-    if (pcap_set_immediate_mode(handle_, 1) != 0) {
-        std::cerr << "[Sniffer] Warning: Failed to set immediate mode" << std::endl;
-    }
+    // 设置过滤器：捕获ARP包和常见端口的TCP流量
+    struct bpf_program filter;
+    const char* filter_exp = "arp or (tcp and (port 80 or port 443 or port 21 or port 22 or port 23 or port 25))";
     
-    // 设置缓冲区大小 (16MB)
-    if (pcap_set_buffer_size(handle_, 16 * 1024 * 1024) != 0) {
-        std::cerr << "[Sniffer] Warning: Failed to set buffer size" << std::endl;
-    }
-    
-    // 设置混杂模式
-    if (pcap_set_promisc(handle_, 1) != 0) {
-        std::cerr << "[Sniffer] Warning: Failed to set promiscuous mode" << std::endl;
-    }
-    
-    // 设置超时时间
-    if (pcap_set_timeout(handle_, 1000) != 0) {
-        std::cerr << "[Sniffer] Warning: Failed to set timeout" << std::endl;
-    }
-    
-    // 激活句柄
-    int ret = pcap_activate(handle_);
-    if (ret != 0) {
-        std::cerr << "[Sniffer] Failed to activate pcap handle: " 
-                  << pcap_geterr(handle_) << std::endl;
+    if (pcap_compile(handle_, &filter, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+        std::cerr << "[Packet Sniffer] Could not parse filter: " << pcap_geterr(handle_) << std::endl;
         pcap_close(handle_);
         handle_ = nullptr;
         return false;
     }
     
-    // 设置BPF过滤器 - 捕获ARP和HTTP流量
-    struct bpf_program fp;
-    const char* filter_exp = "arp or (tcp and (port 80 or port 443 or port 8080 or port 801))";
-    
-    if (pcap_compile(handle_, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-        std::cerr << "[Sniffer] Failed to compile filter: " << pcap_geterr(handle_) << std::endl;
+    if (pcap_setfilter(handle_, &filter) == -1) {
+        std::cerr << "[Packet Sniffer] Could not install filter: " << pcap_geterr(handle_) << std::endl;
+        pcap_freecode(&filter);
         pcap_close(handle_);
         handle_ = nullptr;
         return false;
     }
     
-    if (pcap_setfilter(handle_, &fp) == -1) {
-        std::cerr << "[Sniffer] Failed to set filter: " << pcap_geterr(handle_) << std::endl;
-        pcap_freecode(&fp);
-        pcap_close(handle_);
-        handle_ = nullptr;
-        return false;
-    }
+    pcap_freecode(&filter);
     
-    pcap_freecode(&fp);
-    
-    std::cout << "[Sniffer] Initialized on interface " << interface_ 
-              << " with filter: " << filter_exp << std::endl;
+    std::cout << "[Packet Sniffer] Initialized successfully with filter: " << filter_exp << std::endl;
     return true;
 }
 
-bool PacketSniffer::initialize_with_ipc(const std::string& packet_addr, const std::string& command_addr) {
-    // 创建并初始化IPC管理器
-    ipc_manager_ = new IPCManager();
-    if (!ipc_manager_->initialize(packet_addr, command_addr)) {
-        std::cerr << "[Sniffer] Failed to initialize IPC manager" << std::endl;
-        delete ipc_manager_;
-        ipc_manager_ = nullptr;
-        return false;
-    }
-    
-    // 调用普通初始化
-    return initialize();
-}
-
-void PacketSniffer::start_sniffing() {
-    if (!handle_) {
-        std::cerr << "[Sniffer] Cannot start sniffing: not initialized" << std::endl;
-        return;
-    }
-    
-    running_ = true;
-    std::cout << "[Sniffer] Starting packet capture loop..." << std::endl;
-    
-    // 开始捕获循环
-    pcap_loop(handle_, -1, packet_handler, reinterpret_cast<u_char*>(this));
-}
-
-void PacketSniffer::stop() {
-    if (running_ && handle_) {
+// 保持原有的其他方法不变
+void PacketSniffer::stop_capture() {
+    if (running_) {
         running_ = false;
-        pcap_breakloop(handle_);
-        
-        // 获取详细统计信息
-        struct pcap_stat stats;
-        if (pcap_stats(handle_, &stats) == 0) {
-            packets_dropped_ = stats.ps_drop;
-            
-            // 🔧 增强：计算捕获率和性能指标
-            uint64_t total_packets = packets_captured_ + packets_dropped_;
-            double capture_rate = total_packets > 0 ? 
-                (double)packets_captured_ / total_packets * 100.0 : 0.0;
-            
-            std::cout << "[Sniffer] ===== Final Performance Report =====" << std::endl;
-            std::cout << "[Sniffer] Packets Captured: " << packets_captured_ << std::endl;
-            std::cout << "[Sniffer] Packets Dropped: " << packets_dropped_ << std::endl;
-            std::cout << "[Sniffer] Total Packets: " << total_packets << std::endl;
-            std::cout << "[Sniffer] Capture Rate: " << std::fixed << std::setprecision(2) 
-                      << capture_rate << "%" << std::endl;
-            
-            // 🔧 性能警告机制
-            if (capture_rate < 95.0 && packets_dropped_ > 100) {
-                std::cout << "[Sniffer] ⚠️  WARNING: Low capture rate detected!" << std::endl;
-                std::cout << "[Sniffer] 💡 Consider: Reduce buffer size, increase CPU priority, or optimize filters" << std::endl;
-            } else if (capture_rate >= 99.0) {
-                std::cout << "[Sniffer] ✅ Excellent capture performance!" << std::endl;
-            }
-            std::cout << "[Sniffer] =======================================" << std::endl;
+        if (capture_thread_ && capture_thread_->joinable()) {
+            capture_thread_->join();
         }
-        
+    }
+    
+    if (handle_) {
         pcap_close(handle_);
         handle_ = nullptr;
     }
+    
+    if (ipc_manager_) {
+        ipc_manager_->shutdown();
+    }
+    
+    std::cout << "[Packet Sniffer] Stopped capture" << std::endl;
 }
 
-void PacketSniffer::packet_handler(u_char* user, const struct pcap_pkthdr* header,
-                                  const u_char* packet) {
-    PacketSniffer* sniffer = reinterpret_cast<PacketSniffer*>(user);
-    if (sniffer && sniffer->running_) {
-        sniffer->process_packet(header, packet);
+bool PacketSniffer::start_capture() {
+    if (!handle_) {
+        std::cerr << "[Packet Sniffer] Not initialized" << std::endl;
+        return false;
     }
+    
+    if (running_) {
+        std::cout << "[Packet Sniffer] Already capturing" << std::endl;
+        return true;
+    }
+    
+    running_ = true;
+    capture_thread_ = std::make_unique<std::thread>(&PacketSniffer::capture_loop, this);
+    
+    std::cout << "[Packet Sniffer] Started packet capture" << std::endl;
+    return true;
+}
+
+void PacketSniffer::capture_loop() {
+    std::cout << "[Packet Sniffer] Starting packet capture loop..." << std::endl;
+    
+    while (running_) {
+        struct pcap_pkthdr* header;
+        const u_char* packet;
+        
+        int result = pcap_next_ex(handle_, &header, &packet);
+        
+        if (result == 1) {
+            // 成功捕获到包
+            total_packets_++;
+            process_packet(header, packet);
+        } else if (result == 0) {
+            // 超时，继续循环
+            continue;
+        } else if (result == -1) {
+            // 错误
+            std::cerr << "[Packet Sniffer] Error reading packet: " << pcap_geterr(handle_) << std::endl;
+            break;
+        } else if (result == -2) {
+            // 到达文件末尾或pcap_breakloop被调用
+            break;
+        }
+    }
+    
+    std::cout << "[Packet Sniffer] Capture loop ended" << std::endl;
 }
 
 void PacketSniffer::process_packet(const struct pcap_pkthdr* header, const u_char* packet) {
-    packets_captured_++;
-    
-    // 基本数据包信息
     PacketInfo pkt_info;
-    pkt_info.timestamp = header->ts;
-    pkt_info.length = header->caplen;
-    pkt_info.type = PacketType::UNKNOWN;
     
     // 解析以太网头
-    if (header->caplen < sizeof(struct ethhdr)) {
-        return;
-    }
+    struct ether_header* eth_header = (struct ether_header*)packet;
     
-    struct ethhdr* eth_header = (struct ethhdr*)packet;
+    // 转换MAC地址
+    pkt_info.src_mac = mac_to_string(eth_header->ether_shost);
+    pkt_info.dst_mac = mac_to_string(eth_header->ether_dhost);
+    pkt_info.timestamp = get_timestamp_ms();
+    pkt_info.packet_size = header->len;
     
-    // 检查是否为ARP包
-    if (ntohs(eth_header->h_proto) == ETH_P_ARP) {
-        if (header->caplen >= sizeof(struct ethhdr) + sizeof(struct ether_arp)) {
-            pkt_info.type = PacketType::ARP;
-            
-            struct ether_arp* arp_header = (struct ether_arp*)(packet + sizeof(struct ethhdr));
-            
-            // 提取ARP信息
-            pkt_info.src_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_spa);
-            pkt_info.dst_ip = inet_ntoa(*(struct in_addr*)arp_header->arp_tpa);
-            pkt_info.arp_opcode = ntohs(arp_header->arp_op);
-            
-            // 复制MAC地址
-            memcpy(pkt_info.src_mac, arp_header->arp_sha, 6);
-            memcpy(pkt_info.dst_mac, arp_header->arp_tha, 6);
-        }
-    }
-    // 检查是否为IP包
-    else if (ntohs(eth_header->h_proto) == ETH_P_IP) {
-        if (header->caplen < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-            return;
+    uint16_t ether_type = ntohs(eth_header->ether_type);
+    
+    if (ether_type == ETHERTYPE_ARP) {
+        pkt_info.protocol = "ARP";
+        // 解析ARP包
+        struct ether_arp* arp_header = (struct ether_arp*)(packet + sizeof(struct ether_header));
+        
+        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, arp_header->arp_spa, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, arp_header->arp_tpa, dst_ip, INET_ADDRSTRLEN);
+        
+        pkt_info.src_ip = src_ip;
+        pkt_info.dst_ip = dst_ip;
+        
+        filtered_packets_++;
+        
+        // 发送到Python进行分析
+        if (!ipc_manager_->send_packet(pkt_info)) {
+            // 发送失败，可能是缓冲区满，这在高频情况下是正常的
         }
         
-        struct iphdr* ip_header = (struct iphdr*)(packet + sizeof(struct ethhdr));
+    } else if (ether_type == ETHERTYPE_IP) {
+        // 解析IP包
+        struct iphdr* ip_header = (struct iphdr*)(packet + sizeof(struct ether_header));
         
-        // 检查是否为TCP包
+        char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &ip_header->saddr, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &ip_header->daddr, dst_ip, INET_ADDRSTRLEN);
+        
+        pkt_info.src_ip = src_ip;
+        pkt_info.dst_ip = dst_ip;
+        
         if (ip_header->protocol == IPPROTO_TCP) {
-            int ip_header_len = ip_header->ihl * 4;
-            if (header->caplen < sizeof(struct ethhdr) + ip_header_len + sizeof(struct tcphdr)) {
-                return;
-            }
+            pkt_info.protocol = "TCP";
             
-            struct tcphdr* tcp_header = (struct tcphdr*)(packet + sizeof(struct ethhdr) + ip_header_len);
-            
-            // 检查是否为HTTP端口
+            // 可以进一步解析TCP头以获取端口信息
+            struct tcphdr* tcp_header = (struct tcphdr*)(packet + sizeof(struct ether_header) + (ip_header->ihl * 4));
+            uint16_t src_port = ntohs(tcp_header->source);
             uint16_t dst_port = ntohs(tcp_header->dest);
-            if (dst_port == 80 || dst_port == 443 || dst_port == 8080 || dst_port == 801) {
-                pkt_info.type = PacketType::HTTP;
+            
+            // 检查是否是我们感兴趣的端口
+            if (src_port == 80 || dst_port == 80 || src_port == 443 || dst_port == 443 ||
+                src_port == 21 || dst_port == 21 || src_port == 22 || dst_port == 22 ||
+                src_port == 23 || dst_port == 23 || src_port == 25 || dst_port == 25) {
                 
-                struct in_addr src_addr, dst_addr;
-                src_addr.s_addr = ip_header->saddr;
-                dst_addr.s_addr = ip_header->daddr;
+                filtered_packets_++;
                 
-                pkt_info.src_ip = inet_ntoa(src_addr);
-                pkt_info.dst_ip = inet_ntoa(dst_addr);
-                pkt_info.src_port = ntohs(tcp_header->source);
-                pkt_info.dst_port = dst_port;
+                // 如果需要，可以提取HTTP数据等
+                pkt_info.raw_data = std::string((char*)packet, std::min((int)header->len, 200)); // 只保存前200字节
                 
-                // 如果有HTTP数据，复制payload
-                int tcp_header_len = tcp_header->doff * 4;
-                int total_header_len = sizeof(struct ethhdr) + ip_header_len + tcp_header_len;
-                
-                if (header->caplen > total_header_len) {
-                    int payload_len = header->caplen - total_header_len;
-                    if (payload_len > 0 && payload_len < MAX_PAYLOAD_SIZE) {
-                        memcpy(pkt_info.payload, packet + total_header_len, payload_len);
-                        pkt_info.payload_length = payload_len;
-                        pkt_info.payload[payload_len] = '\0';
-                    }
+                // 发送到Python进行分析
+                if (!ipc_manager_->send_packet(pkt_info)) {
+                    // 发送失败处理
                 }
             }
         }
     }
-    
-    // 如果是我们感兴趣的包类型，发送给Python层
-    if (pkt_info.type != PacketType::UNKNOWN) {
-        if (ipc_manager_) {
-            ipc_manager_->send_packet(pkt_info);
-        }
-    }
 }
 
-bool PacketSniffer::is_arp_packet(const u_char* packet, int len) {
-    if (len < sizeof(struct ethhdr)) return false;
-    struct ethhdr* eth_header = (struct ethhdr*)packet;
-    return ntohs(eth_header->h_proto) == ETH_P_ARP;
+size_t PacketSniffer::get_total_packets() const {
+    return total_packets_.load();
 }
 
-bool PacketSniffer::is_http_packet(const u_char* packet, int len) {
-    if (len < sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr)) {
-        return false;
-    }
-    
-    struct ethhdr* eth_header = (struct ethhdr*)packet;
-    if (ntohs(eth_header->h_proto) != ETH_P_IP) return false;
+size_t PacketSniffer::get_filtered_packets() const {
+    return filtered_packets_.load();
+}
+
+std::string PacketSniffer::get_interface() const {
+    return interface_;
+}
+
+bool PacketSniffer::is_running() const {
+    return running_;
+}
     
     struct iphdr* ip_header = (struct iphdr*)(packet + sizeof(struct ethhdr));
     if (ip_header->protocol != IPPROTO_TCP) return false;

@@ -6,7 +6,7 @@ cd "D:\Desktop\我的项目\arp欺骗\arp_pro"
 git add .
 git commit -m "v4修复Claude"
 git push
-cd "D:\Desktop\我的项目\arp欺骗\arp_s"; git add .; git commit -m "cpp核心业务版本"; git push            ***********
+cd "D:\Desktop\我的项目\arp欺骗\arp_s"; git add .; git commit -m "cpp核心业务版本7"; git push            ***********
 
 
 ⚠️ 如果还是提示无 upstream（一般不会再出现），就执行一次：

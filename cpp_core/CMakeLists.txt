@@ -55,13 +55,28 @@ endif()
 # 查找RapidJSON
 find_path(RAPIDJSON_INCLUDE_DIR rapidjson/rapidjson.h)
 if(NOT RAPIDJSON_INCLUDE_DIR)
-    message(FATAL_ERROR "RapidJSON not found. Please install rapidjson-dev")
+    message(WARNING "RapidJSON not found, trying jsoncpp instead")
+    # 尝试查找jsoncpp
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(JSONCPP jsoncpp)
+    if(NOT JSONCPP_FOUND)
+        message(FATAL_ERROR "Neither RapidJSON nor jsoncpp found. Please install libjsoncpp-dev")
+    else()
+        set(USE_JSONCPP TRUE)
+        message(STATUS "Using jsoncpp instead of RapidJSON")
+    endif()
 endif()
 
 # 包含目录
 include_directories(${LIBPCAP_INCLUDE_DIRS})
 include_directories(${ZMQ_INCLUDE_DIR})
-include_directories(${RAPIDJSON_INCLUDE_DIR})
+
+if(USE_JSONCPP)
+    include_directories(${JSONCPP_INCLUDE_DIRS})
+else()
+    include_directories(${RAPIDJSON_INCLUDE_DIR})
+endif()
+
 include_directories(src)
 
 # 源文件
@@ -86,12 +101,20 @@ target_link_libraries(arp_core
     pthread
 )
 
+if(USE_JSONCPP)
+    target_link_libraries(arp_core ${JSONCPP_LIBRARIES})
+endif()
+
 # 链接库 - Python模块
 target_link_libraries(arp_core_cpp PRIVATE
     ${LIBPCAP_LIBRARIES}
     ${ZMQ_LIBRARY}
     pthread
 )
+
+if(USE_JSONCPP)
+    target_link_libraries(arp_core_cpp PRIVATE ${JSONCPP_LIBRARIES})
+endif()
 
 # 编译选项
 target_compile_options(arp_core PRIVATE ${LIBPCAP_CFLAGS_OTHER})

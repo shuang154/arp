@@ -1,0 +1,140 @@
+sudo chown -R zs:zs /home/zs/文档/projects/arp_pro
+cd /home/zs/文档/projects/arp_pro/scripts
+chmod +x build.sh
+sudo ./build.sh
+python3 local_diagnosis.py
+
+
+
+cd /home/zs/文档/projects/arp_s/scripts && sudo ./build.sh
+./build.sh -f     清除编译文件
+sudo pkill -9 -f arp_core     杀死残留进程
+sudo ./build.sh --force   重新构建
+
+
+
+ARP Spoofer Pro 项目完整指令总结
+项目架构
+arp_pro/
+├── cpp_core/           # C++高性能核心引擎
+├── python_supervisor/  # Python智能监督者
+├── config/            # 配置文件
+└── scripts/           # 构建和启动脚本
+核心指令汇总
+
+1. 一键启动（推荐）
+# 进入项目目录
+cd /home/zs/文档/projects/arp_pro/scripts
+# 一键构建并启动
+sudo ./build.sh --quick
+# 或者简写
+sudo ./build.sh -q
+
+2. 构建相关指令
+# 查看帮助
+sudo ./build.sh --help
+# 交互式构建（传统方式）
+sudo ./build.sh
+# 强制重新构建
+sudo ./build.sh --force
+# 强制重新构建并快速启动
+sudo ./build.sh --force --quick
+
+3. 手动启动指令
+# 前台运行（显示实时日志）
+sudo ../scripts/launch.sh -i eth0
+# 后台运行（守护进程模式）
+sudo ../scripts/launch.sh -i eth0 -d
+# 查看启动脚本帮助
+sudo ../scripts/launch.sh -h
+
+4. 系统监控指令
+# 查看运行进程
+ps aux | grep arp_
+# 查看实时日志（后台模式）
+tail -f /var/log/arp_spoofer_core.log
+tail -f /var/log/arp_spoofer_supervisor.log
+# 查看系统状态（Web API）
+curl http://localhost:8080/api/status
+# 查看攻击信息
+curl http://localhost:8080/api/attacks
+# 查看缓存状态
+curl http://localhost:8080/api/cache
+
+5. 服务管理指令
+# 停止服务（如果是后台运行）
+sudo pkill -f arp_core
+sudo pkill -f "python.*main.py"
+# 清理IPC文件
+sudo rm -f /tmp/arp_spoofer_*.ipc
+# 清理PID文件
+sudo rm -f /tmp/arp_spoofer_*.pid
+
+6. 网络相关指令
+# 查看可用网络接口
+ip link show
+# 查看默认路由接口
+ip route | grep default
+# 查看网络连接状态
+ss -tuln | grep 8080
+
+7. 系统依赖安装指令
+# Arch Linux 安装依赖
+sudo pacman -Syu --needed cmake gcc python python-pip libpcap zeromq cppzmq rapidjson pkgconf
+# 检查依赖是否安装
+pkg-config --exists libpcap
+which cmake g++ python3 pip3
+
+
+
+指令含义详解
+构建脚本选项含义
+--quick/-q: 快速启动模式，自动检测网络接口并直接运行
+--force/-f: 强制重新构建，即使已存在构建文件
+--help/-h: 显示帮助信息
+启动脚本选项含义
+-i/--interface: 指定网络接口（必需）
+-d/--daemon: 后台守护进程模式运行
+-h/--help: 显示帮助信息
+运行模式说明
+仅构建模式: 编译完成后退出，不运行
+交互运行模式: 前台运行，显示实时日志，Ctrl+C停止
+守护进程模式: 后台运行，日志写入文件
+快速启动模式: 自动检测网络接口并运行
+项目特性总结
+性能优化特性
+C++核心引擎: 解决Python GIL瓶颈，支持>10k pps
+单通道架构: 替换原有多线程方案，减少资源争用
+TTL智能缓存: 自动过期，避免"永久剪枝"问题
+CPU绑定: 关键线程绑定到特定CPU核心
+智能攻击特性
+事件驱动: 监听ARP查询自动触发攻击
+动态剪枝: 成功攻击的目标自动跳过
+一击脱离: 捕获凭据后立即停止攻击
+网络恢复: 攻击结束后自动恢复ARP表
+监控和管理特性
+Web API接口: HTTP API查看系统状态
+实时统计: 攻击成功率、缓存命中率等
+日志记录: 结构化日志输出
+进程管理: 优雅启动和停止
+部署特性
+自动依赖检查: 检测并提示安装缺失依赖
+配置文件管理: YAML格式配置文件
+服务化部署: 支持systemd服务
+跨平台兼容: 支持多种Linux发行版
+常用操作流程
+首次部署
+cd /home/zs/文档/projects/arp_pro/scripts
+sudo ./build.sh --quick
+日常使用
+sudo ./build.sh -q  # 检查构建并启动
+
+后台运行
+sudo ./build.sh
+# 选择模式 3 (守护进程模式)
+
+状态监控
+curl http://localhost:8080/api/status | jq
+tail -f /var/log/arp_spoofer_*.log
+
+
