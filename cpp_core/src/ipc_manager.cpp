@@ -14,16 +14,16 @@ bool IPCManager::initialize(const std::string& packet_addr, const std::string& c
         context_ = std::make_unique<zmq::context_t>(1);
 
         // 使用从Python传入的地址，而不是硬编码
-        packet_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::push);
-        packet_sender_->connect(packet_addr);
+        packet_sender_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pub);
+        packet_sender_->bind(packet_addr);  // C++ 端绑定，Python 端连接
         packet_sender_->set(zmq::sockopt::sndtimeo, 1000);
 
         command_receiver_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pull);
-        command_receiver_->connect(command_addr);
+        command_receiver_->bind(command_addr);  // C++ 端绑定，Python 端连接
         command_receiver_->set(zmq::sockopt::rcvtimeo, 1);
         
         initialized_ = true;
-        std::cout << "[IPC Manager] Initialized successfully. Packet sender connected to " << packet_addr << std::endl;
+        std::cout << "[IPC Manager] Initialized successfully. Packet sender bound to " << packet_addr << std::endl;
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[IPC Manager] Initialization failed: " << e.what() << std::endl;

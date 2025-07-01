@@ -201,6 +201,9 @@ class PythonSupervisor:
             # ★ ZMQ套接字将在packet_receiver_loop中初始化
             self.logger.info(f"🔌 ZMQ packet stream will connect to: {self.config.ipc.packet_address}")
             
+            # 初始化攻击协调器的命令发送器
+            self.attack_coordinator.initialize(self.send_command_to_cpp)
+            
             self.logger.info("✅ Python Supervisor initialized successfully")
             return True
             
@@ -218,8 +221,13 @@ class PythonSupervisor:
             self.packet_receiver_socket.connect(self.config.ipc.packet_address)
             self.packet_receiver_socket.setsockopt(zmq.SUBSCRIBE, b"")  # 订阅所有消息
             self.logger.info(f"📡 Connected to packet stream: {self.config.ipc.packet_address}")
+            
+            # 初始化命令发送套接字
+            self.command_sender_socket = self.zmq_context.socket(zmq.PUSH)
+            self.command_sender_socket.connect(self.config.ipc.command_address)
+            self.logger.info(f"📤 Connected to command stream: {self.config.ipc.command_address}")
         except Exception as e:
-            self.logger.error(f"❌ Failed to connect to packet stream: {e}")
+            self.logger.error(f"❌ Failed to connect to ZMQ streams: {e}")
             return
         
         # 统计变量
@@ -279,8 +287,10 @@ class PythonSupervisor:
         try:
             if self.packet_receiver_socket:
                 self.packet_receiver_socket.close()
+            if self.command_sender_socket:
+                self.command_sender_socket.close()
         except Exception as e:
-            self.logger.error(f"❌ Error closing packet receiver socket: {e}")
+            self.logger.error(f"❌ Error closing ZMQ sockets: {e}")
         
         self.logger.info("📡 Packet receiver thread stopped")
         
@@ -497,6 +507,27 @@ class PythonSupervisor:
                 if self.running:  # 只在运行时记录错误
                     self.logger.warning(f"Status monitor error: {e}")
                 time.sleep(10)
+
+    def send_command_to_cpp(self, command_dict) -> bool:
+        """发送命令到C++核心"""
+        try:
+            if not self.command_sender_socket:
+                self.logger.error("❌ Command sender socket not initialized")
+                return False
+            
+            # 将命令序列化为JSON
+            command_json = json.dumps(command_dict)
+            
+            # 发送命令
+            self.command_sender_socket.send_string(command_json, zmq.NOBLOCK)
+            return True
+            
+        except zmq.Again:
+            self.logger.warning("⚠️ Command send buffer full, command dropped")
+            return False
+        except Exception as e:
+            self.logger.error(f"❌ Error sending command: {e}")
+            return False
 
 def parse_arguments():
     """解析命令行参数"""
